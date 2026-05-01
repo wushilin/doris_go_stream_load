@@ -150,14 +150,12 @@ func TestCSVSingleCoalescesRows(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord("a", "b")
+	handle, err := client.SendRecord("a", "b")
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	for _, handle := range handles {
-		if result := handle.Wait(); result.Err != nil {
-			t.Fatalf("Wait() error = %v", result.Err)
-		}
+	if result := handle.Wait(); result.Err != nil {
+		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
 	if got := sender.Attempts(); got != 1 {
@@ -186,7 +184,7 @@ func TestClientStatsTracksCompletedJobsAndRetries(t *testing.T) {
 		DorisUploadWorkers:        1,
 		MaxUploadQueueSize:        8,
 		DorisUploadRequestTimeout: 10 * time.Second,
-		UploadTimeout:             100 * time.Millisecond,
+		DorisUploadTimeout:        100 * time.Millisecond,
 		Logger:                    log.New(io.Discard, "", 0),
 	})
 	defer client.Close()
@@ -337,11 +335,11 @@ func TestNewClientFakeSendSucceedsAfterDelay(t *testing.T) {
 	defer client.Close()
 
 	started := time.Now()
-	handles, err := client.SendRecord("a")
+	handle, err := client.SendRecord("a")
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err != nil {
 		t.Fatalf("Wait() error = %v", result.Err)
 	}
@@ -388,21 +386,21 @@ func TestBatcherLingersForNonFullBatch(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord("a")
+	handle, err := client.SendRecord("a")
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
 	time.Sleep(20 * time.Millisecond)
-	moreHandles, err := client.SendRecord("b")
+	moreHandle, err := client.SendRecord("b")
 	if err != nil {
 		t.Fatalf("SendRecord() second error = %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if _, err := handles[0].WaitContext(ctx); err != nil {
+	if _, err := handle.WaitContext(ctx); err != nil {
 		t.Fatalf("WaitContext() error = %v", err)
 	}
-	if _, err := moreHandles[0].WaitContext(ctx); err != nil {
+	if _, err := moreHandle.WaitContext(ctx); err != nil {
 		t.Fatalf("WaitContext() second error = %v", err)
 	}
 	if got := sender.Bodies(); len(got) != 1 || got[0] != "a\nb" {
@@ -467,13 +465,13 @@ func TestBatcherDoesNotLingerForFullBatch(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord("a")
+	handle, err := client.SendRecord("a")
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if _, err := handles[0].WaitContext(ctx); err != nil {
+	if _, err := handle.WaitContext(ctx); err != nil {
 		t.Fatalf("WaitContext() error = %v, want full batch dispatched before linger", err)
 	}
 }
@@ -490,14 +488,12 @@ func TestCSVBatchSendCoalescesRows(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendBatch([]string{"a", "b", "c", "d"})
+	handle, err := client.SendBatch([]string{"a", "b", "c", "d"})
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	for _, handle := range handles {
-		if result := handle.Wait(); result.Err != nil {
-			t.Fatalf("Wait() error = %v", result.Err)
-		}
+	if result := handle.Wait(); result.Err != nil {
+		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
 	if got := sender.Bodies(); len(got) != 1 || got[0] != "a\nb\nc\nd" {
@@ -517,14 +513,12 @@ func TestJSONSingleCoalescesRecords(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"a":1}`, `{"b":2}`)
+	handle, err := client.SendRecord(`{"a":1}`, `{"b":2}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	for _, handle := range handles {
-		if result := handle.Wait(); result.Err != nil {
-			t.Fatalf("Wait() error = %v", result.Err)
-		}
+	if result := handle.Wait(); result.Err != nil {
+		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
 	if got := sender.Bodies(); len(got) != 1 || got[0] != `[{"a":1},{"b":2}]` {
@@ -565,11 +559,11 @@ func TestJSONSingleAllowsInvalidRecordWhenValidationDisabled(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"a":`)
+	handle, err := client.SendRecord(`{"a":`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	if result := handles[0].Wait(); result.Err != nil {
+	if result := handle.Wait(); result.Err != nil {
 		t.Fatalf("Wait() error = %v", result.Err)
 	}
 	if got := sender.Bodies(); len(got) != 1 || got[0] != `[{"a":]` {
@@ -589,14 +583,12 @@ func TestJSONBatchSendCoalescesObjects(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendBatch([]string{`{"a":1}`, `{"b":2}`, `{"c":3}`})
+	handle, err := client.SendBatch([]string{`{"a":1}`, `{"b":2}`, `{"c":3}`})
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	for _, handle := range handles {
-		if result := handle.Wait(); result.Err != nil {
-			t.Fatalf("Wait() error = %v", result.Err)
-		}
+	if result := handle.Wait(); result.Err != nil {
+		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
 	if got := sender.Bodies(); len(got) != 1 || got[0] != `[{"a":1},{"b":2},{"c":3}]` {
@@ -617,14 +609,12 @@ func TestJSONBatchSendPreservesObjectWhitespace(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendBatch([]string{` { "a" : 1 } `, `{"b":2}`})
+	handle, err := client.SendBatch([]string{` { "a" : 1 } `, `{"b":2}`})
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	for _, handle := range handles {
-		if result := handle.Wait(); result.Err != nil {
-			t.Fatalf("Wait() error = %v", result.Err)
-		}
+	if result := handle.Wait(); result.Err != nil {
+		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
 	if got := sender.Bodies(); len(got) != 1 || got[0] != `[ { "a" : 1 } ,{"b":2}]` {
@@ -645,14 +635,12 @@ func TestSubmittedBatchStillProducesOneOutboundRequest(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendBatch([]string{`{"a":1}`, `{"b":2}`})
+	handle, err := client.SendBatch([]string{`{"a":1}`, `{"b":2}`})
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	for _, handle := range handles {
-		if result := handle.Wait(); result.Err != nil {
-			t.Fatalf("Wait() error = %v", result.Err)
-		}
+	if result := handle.Wait(); result.Err != nil {
+		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
 	if got := sender.Attempts(); got != 1 {
@@ -699,14 +687,12 @@ func TestJSONBatchAllowsInvalidJSONWhenValidationDisabled(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendBatch([]string{`{"a":`, `{"b":2}`})
+	handle, err := client.SendBatch([]string{`{"a":`, `{"b":2}`})
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	for _, handle := range handles {
-		if result := handle.Wait(); result.Err != nil {
-			t.Fatalf("Wait() error = %v", result.Err)
-		}
+	if result := handle.Wait(); result.Err != nil {
+		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
 	if got := sender.Bodies(); len(got) != 1 || got[0] != `[{"a":,{"b":2}]` {
@@ -727,18 +713,18 @@ func TestClientRetriesTransientFailure(t *testing.T) {
 		Columns:       []string{"c1"},
 		Mode:          ModeJSON, Linger: 10 * time.Millisecond,
 		DorisUploadWorkers: 1,
-		UploadTimeout:      100 * time.Millisecond,
+		DorisUploadTimeout: 100 * time.Millisecond,
 		MaxUploadQueueSize: 8,
 		Logger:             log.New(io.Discard, "", 0),
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"k":1}`)
+	handle, err := client.SendRecord(`{"k":1}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
 
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err != nil {
 		t.Fatalf("Wait() error = %v", result.Err)
 	}
@@ -766,12 +752,12 @@ func TestClientDoesNotRetryNonRetriableFailure(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"k":1}`)
+	handle, err := client.SendRecord(`{"k":1}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
 
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err == nil {
 		t.Fatal("Wait() error = nil, want failure")
 	}
@@ -797,13 +783,13 @@ func TestCallbackRunsOnCompletion(t *testing.T) {
 	defer client.Close()
 
 	done := make(chan DeliveryResult, 1)
-	handles, err := client.SendRecordWithCallback(func(result DeliveryResult) {
+	handle, err := client.SendRecordWithCallback(func(result DeliveryResult) {
 		done <- result
 	}, "a")
 	if err != nil {
 		t.Fatalf("SendRecordWithCallback() error = %v", err)
 	}
-	if result := handles[0].Wait(); result.Err != nil {
+	if result := handle.Wait(); result.Err != nil {
 		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
@@ -831,16 +817,14 @@ func TestBatchCallbackRunsOncePerSubmittedBatch(t *testing.T) {
 	defer client.Close()
 
 	done := make(chan DeliveryResult, 2)
-	handles, err := client.SendBatchWithCallback(func(result DeliveryResult) {
+	handle, err := client.SendBatchWithCallback(func(result DeliveryResult) {
 		done <- result
 	}, []string{"a", "b"})
 	if err != nil {
 		t.Fatalf("SendBatchWithCallback() error = %v", err)
 	}
-	for _, handle := range handles {
-		if result := handle.Wait(); result.Err != nil {
-			t.Fatalf("Wait() error = %v", result.Err)
-		}
+	if result := handle.Wait(); result.Err != nil {
+		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
 	select {
@@ -932,15 +916,12 @@ func TestJSONBatchAlwaysCoalescesWhenPossible(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendBatch([]string{`{"a":1}`, `{"b":2}`})
+	handle, err := client.SendBatch([]string{`{"a":1}`, `{"b":2}`})
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	if result := handles[0].Wait(); result.Err != nil {
+	if result := handle.Wait(); result.Err != nil {
 		t.Fatalf("Wait() error = %v", result.Err)
-	}
-	if result := handles[1].Wait(); result.Err != nil {
-		t.Fatalf("Wait() second error = %v", result.Err)
 	}
 	if got := sender.Bodies(); len(got) != 1 || got[0] != `[{"a":1},{"b":2}]` {
 		t.Fatalf("bodies = %#v, want JSON arrays to coalesce whenever batching allows it", got)
@@ -976,12 +957,12 @@ func TestSendRecordEnqueuesOneSubmissionUnitWhenCapacityAvailable(t *testing.T) 
 		MaxQueueSize:  1,
 	})
 
-	handles, err := client.SendRecord("a", "b")
+	handle, err := client.SendRecord("a", "b")
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	if len(handles) != 2 {
-		t.Fatalf("handles = %d, want 2", len(handles))
+	if handle == nil {
+		t.Fatal("handle = nil, want shared batch handle")
 	}
 	if got := client.intake.Len(); got != 1 {
 		t.Fatalf("queued submissions = %d, want 1", got)
@@ -1017,12 +998,12 @@ func TestSendRecordBatchUsesOneQueueSlot(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	handles, err := client.SendRecordContext(ctx, "a", "b")
+	handle, err := client.SendRecordContext(ctx, "a", "b")
 	if err != nil {
 		t.Fatalf("SendRecordContext() error = %v", err)
 	}
-	if len(handles) != 2 {
-		t.Fatalf("handles = %d, want 2", len(handles))
+	if handle == nil {
+		t.Fatal("handle = nil, want shared batch handle")
 	}
 	if got := client.intake.Len(); got != 1 {
 		t.Fatalf("queued submissions = %d, want 1", got)
@@ -1081,18 +1062,18 @@ func TestUploadRetryBackoffGrowsExponentiallyToCap(t *testing.T) {
 		Columns:       []string{"c1"},
 		Mode:          ModeJSON, Linger: 10 * time.Millisecond,
 		DorisUploadWorkers: 1,
-		UploadTimeout:      100 * time.Millisecond,
+		DorisUploadTimeout: 100 * time.Millisecond,
 		MaxUploadQueueSize: 8,
 		Logger:             log.New(io.Discard, "", 0),
 	})
 	defer client.Close()
 
 	started := time.Now()
-	handles, err := client.SendRecord(`{"k":1}`)
+	handle, err := client.SendRecord(`{"k":1}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	if result := handles[0].Wait(); result.Err != nil {
+	if result := handle.Wait(); result.Err != nil {
 		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
@@ -1119,12 +1100,12 @@ func TestConcurrentSubmission(t *testing.T) {
 
 	for i := 0; i < total; i++ {
 		go func() {
-			handles, err := client.SendRecord("row")
+			handle, err := client.SendRecord("row")
 			if err != nil {
 				errCh <- err
 				return
 			}
-			result := handles[0].Wait()
+			result := handle.Wait()
 			if result.Err != nil {
 				errCh <- result.Err
 				return
@@ -1157,11 +1138,11 @@ func TestGeneratedLabelIsAttachedToLoadRequest(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord("a")
+	handle, err := client.SendRecord("a")
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	if result := handles[0].Wait(); result.Err != nil {
+	if result := handle.Wait(); result.Err != nil {
 		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
@@ -1195,11 +1176,11 @@ func TestAmbiguousSendPollsUntilVisible(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"k":1}`)
+	handle, err := client.SendRecord(`{"k":1}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err != nil {
 		t.Fatalf("Wait() error = %v", result.Err)
 	}
@@ -1227,17 +1208,17 @@ func TestAmbiguousSendRetriesOnAborted(t *testing.T) {
 		Columns:       []string{"c1"},
 		Mode:          ModeJSON, Linger: 10 * time.Millisecond,
 		DorisUploadWorkers: 1,
-		UploadTimeout:      100 * time.Millisecond,
+		DorisUploadTimeout: 100 * time.Millisecond,
 		StatusPollTimeout:  200 * time.Millisecond, MaxUploadQueueSize: 8,
 		Logger: log.New(io.Discard, "", 0),
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"k":1}`)
+	handle, err := client.SendRecord(`{"k":1}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err != nil {
 		t.Fatalf("Wait() error = %v, want retry to succeed after ABORTED", result.Err)
 	}
@@ -1428,11 +1409,11 @@ func TestHTTPSenderAppliesBasicAuthHeader(t *testing.T) {
 	}
 	defer client.Close()
 
-	handles, err := client.SendRecord("a")
+	handle, err := client.SendRecord("a")
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	if result := handles[0].Wait(); result.Err != nil {
+	if result := handle.Wait(); result.Err != nil {
 		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
@@ -1563,17 +1544,17 @@ func TestAmbiguousSendRetriesOnUnknown(t *testing.T) {
 		Columns:       []string{"c1"},
 		Mode:          ModeJSON, Linger: 10 * time.Millisecond,
 		DorisUploadWorkers: 1,
-		UploadTimeout:      100 * time.Millisecond,
+		DorisUploadTimeout: 100 * time.Millisecond,
 		StatusPollTimeout:  200 * time.Millisecond, MaxUploadQueueSize: 8,
 		Logger: log.New(io.Discard, "", 0),
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"k":1}`)
+	handle, err := client.SendRecord(`{"k":1}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err != nil {
 		t.Fatalf("Wait() error = %v, want retry to succeed after UNKNOWN", result.Err)
 	}
@@ -1604,17 +1585,17 @@ func TestDialFailureRetriesWithoutPolling(t *testing.T) {
 		Columns:       []string{"c1"},
 		Mode:          ModeJSON, Linger: 10 * time.Millisecond,
 		DorisUploadWorkers: 1,
-		UploadTimeout:      100 * time.Millisecond,
+		DorisUploadTimeout: 100 * time.Millisecond,
 		MaxUploadQueueSize: 8,
 		Logger:             log.New(io.Discard, "", 0),
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"k":1}`)
+	handle, err := client.SendRecord(`{"k":1}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err != nil {
 		t.Fatalf("Wait() error = %v", result.Err)
 	}
@@ -1655,11 +1636,11 @@ func TestLabelAlreadyExistsFinishedTreatedAsSuccess(t *testing.T) {
 	}
 	defer client.Close()
 
-	handles, err := client.SendRecord("a")
+	handle, err := client.SendRecord("a")
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	if result := handles[0].Wait(); result.Err != nil {
+	if result := handle.Wait(); result.Err != nil {
 		t.Fatalf("Wait() error = %v, want success for Label Already Exists + FINISHED", result.Err)
 	}
 }
@@ -1671,11 +1652,11 @@ func TestConfigRejectsNonPositiveUploadTimeout(t *testing.T) {
 		Mode:               ModeCSV,
 		Linger:             10 * time.Millisecond,
 		DorisUploadWorkers: 1,
-		UploadTimeout:      -1,
+		DorisUploadTimeout: -1,
 		MaxUploadQueueSize: 8,
 	})
 	if err == nil {
-		t.Fatal("NewClient() error = nil, want error for non-positive UploadTimeout")
+		t.Fatal("NewClient() error = nil, want error for non-positive DorisUploadTimeout")
 	}
 }
 
@@ -1729,11 +1710,11 @@ func TestBasicAuthPreservedOnFEtoBERedirect(t *testing.T) {
 	}
 	defer client.Close()
 
-	handles, err := client.SendRecord("a")
+	handle, err := client.SendRecord("a")
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	if result := handles[0].Wait(); result.Err != nil {
+	if result := handle.Wait(); result.Err != nil {
 		t.Fatalf("Wait() error = %v", result.Err)
 	}
 
@@ -1972,11 +1953,11 @@ func TestPublishTimeoutTreatedAsSuccess(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord("a")
+	handle, err := client.SendRecord("a")
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err != nil {
 		t.Fatalf("Wait() error = %v, want success for Publish Timeout", result.Err)
 	}
@@ -2013,11 +1994,11 @@ func TestLabelAlreadyExistsRunningTriggersPolling(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord("a")
+	handle, err := client.SendRecord("a")
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err != nil {
 		t.Fatalf("Wait() error = %v, want success via polling after Label Already Exists RUNNING", result.Err)
 	}
@@ -2050,11 +2031,11 @@ func TestLabelAlreadyExistsUnknownExistingStatusFails(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord("a")
+	handle, err := client.SendRecord("a")
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err == nil {
 		t.Fatal("Wait() error = nil, want failure for Label Already Exists with unknown ExistingJobStatus")
 	}
@@ -2087,11 +2068,11 @@ func TestPollCommittedTreatedAsSuccess(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"k":1}`)
+	handle, err := client.SendRecord(`{"k":1}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err != nil {
 		t.Fatalf("Wait() error = %v, want success for COMMITTED poll state", result.Err)
 	}
@@ -2122,11 +2103,11 @@ func TestPollPrecommittedKeepsPolling(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"k":1}`)
+	handle, err := client.SendRecord(`{"k":1}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err != nil {
 		t.Fatalf("Wait() error = %v, want success after PRECOMMITTED → VISIBLE", result.Err)
 	}
@@ -2159,11 +2140,11 @@ func TestPollTimeoutResultsInFailureWithNoSendRetry(t *testing.T) {
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"k":1}`)
+	handle, err := client.SendRecord(`{"k":1}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err == nil {
 		t.Fatal("Wait() error = nil, want failure after poll timeout")
 	}
@@ -2184,17 +2165,17 @@ func TestUploadTimeoutStopsAdditionalRetriesOnTransientErrors(t *testing.T) {
 		Columns:       []string{"c1"},
 		Mode:          ModeJSON, Linger: 10 * time.Millisecond,
 		DorisUploadWorkers: 1,
-		UploadTimeout:      1 * time.Millisecond,
+		DorisUploadTimeout: 1 * time.Millisecond,
 		MaxUploadQueueSize: 8,
 		Logger:             log.New(io.Discard, "", 0),
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"k":1}`)
+	handle, err := client.SendRecord(`{"k":1}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err == nil {
 		t.Fatal("Wait() error = nil, want failure after upload timeout stops retries")
 	}
@@ -2213,7 +2194,7 @@ func TestUploadTimeoutStopsAdditionalRetriesAfterAbortedPoll(t *testing.T) {
 	withTestPollBackoff(t, 5*time.Millisecond, 10*time.Millisecond)
 	withTestUploadRetryBackoff(t, 5*time.Millisecond, 10*time.Millisecond)
 	// Once polling concludes ABORTED, the client is allowed to retry with a fresh
-	// label. UploadTimeout bounds whether that extra send is attempted.
+	// label. DorisUploadTimeout bounds whether that extra send is attempted.
 	sender := &fakeSender{
 		outcomes: []fakeOutcome{
 			{err: &streamLoadError{Ambiguous: true}},
@@ -2227,17 +2208,17 @@ func TestUploadTimeoutStopsAdditionalRetriesAfterAbortedPoll(t *testing.T) {
 		Columns:       []string{"c1"},
 		Mode:          ModeJSON, Linger: 10 * time.Millisecond,
 		DorisUploadWorkers: 1,
-		UploadTimeout:      1 * time.Millisecond,
+		DorisUploadTimeout: 1 * time.Millisecond,
 		StatusPollTimeout:  200 * time.Millisecond, MaxUploadQueueSize: 8,
 		Logger: log.New(io.Discard, "", 0),
 	})
 	defer client.Close()
 
-	handles, err := client.SendRecord(`{"k":1}`)
+	handle, err := client.SendRecord(`{"k":1}`)
 	if err != nil {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
-	result := handles[0].Wait()
+	result := handle.Wait()
 	if result.Err == nil {
 		t.Fatal("Wait() error = nil, want failure after upload timeout prevents retry")
 	}

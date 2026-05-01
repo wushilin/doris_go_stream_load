@@ -69,7 +69,7 @@ if err != nil {
 }
 defer client.Close()
 
-handles, err := client.SendBatch([]string{
+handle, err := client.SendBatch([]string{
 	`{"event_time":"2026-04-28T10:00:00Z","user_id":42,"payload":"a"}`,
 	`{"event_time":"2026-04-28T10:00:01Z","user_id":43,"payload":"b"}`,
 })
@@ -77,10 +77,8 @@ if err != nil {
 	panic(err)
 }
 
-for _, handle := range handles {
-	if result := handle.Wait(); result.Err != nil {
-		panic(result.Err)
-	}
+if result := handle.Wait(); result.Err != nil {
+	panic(result.Err)
 }
 ```
 
@@ -110,10 +108,10 @@ if err != nil {
 Primary methods:
 
 - `Send(record string) (*Handle, error)`
-- `SendBatch(records []string) ([]*Handle, error)`
+- `SendBatch(records []string) (*Handle, error)`
 - `SendWithCallback(callback DeliveryCallback, record string) (*Handle, error)`
-- `SendBatchWithCallback(callback DeliveryCallback, records []string) ([]*Handle, error)`
-- `SendBatchContext(ctx context.Context, records []string) ([]*Handle, error)`
+- `SendBatchWithCallback(callback DeliveryCallback, records []string) (*Handle, error)`
+- `SendBatchContext(ctx context.Context, records []string) (*Handle, error)`
 - `Close() error`
 
 ## Input Model
@@ -136,6 +134,8 @@ client.Send(`{"id":1,"name":"alice"}`)
 ```
 
 `SendBatch([]string{...})` is one submitted batch containing multiple logical items.
+
+`SendBatch(...)` returns one shared `Handle`, because that submitted batch stays whole and concludes as one Doris load outcome.
 
 The library may merge several submitted batches into one outbound Doris stream-load request, but it does not split one submitted batch across multiple Doris requests.
 
@@ -317,22 +317,13 @@ Default: `300s`
 Values shorter than `10s` are rejected during `NewClient(...)` to prevent pairing large uploads with
 an unrealistically short timeout.
 
-#### `UploadTimeout`
+#### `DorisUploadTimeout`
 
 Total time budget for deciding whether to attempt another upload after a retriable failure.
 
 Default: `300s`
 
 This does not interrupt an upload already in progress; it only governs whether a new attempt is started.
-
-Default:
-
-- `300s`
-
-Important:
-
-- this does not interrupt an upload already in progress
-- it only governs whether another upload attempt should be started
 
 Internal upload retry backoff is fixed by the library:
 
@@ -466,7 +457,7 @@ That means:
 - `SendWithCallback(...)` fires once
 - `SendBatchWithCallback(...)` also fires once
 
-All handles in that submitted batch share the same final `DeliveryResult`.
+The returned handle for that submitted batch and the callback both observe the same final `DeliveryResult`.
 
 ## Errors
 
@@ -531,8 +522,8 @@ Duration fields use Go duration strings: `"500ms"`, `"2s"`, `"5m"`.
 
 | JSON key | Type | Default | Description |
 |---|---|---|---|
-| `doris_upload_timeout` | duration | `"300s"` | Total time budget for retry attempts after a retriable failure |
-| `doris_upload_request_timeout` | duration | `"300s"` | HTTP deadline for a single upload or label-poll request (min `"10s"`) |
+| `doris_upload_timeout` | duration | `"300s"` | Total time budget for deciding whether additional upload attempts should happen after a retriable outcome |
+| `doris_upload_request_timeout` | duration | `"300s"` | HTTP deadline for one upload request or one label-poll request (min `"10s"`) |
 | `status_poll_timeout` | duration | `"300s"` | Max time spent polling label state after an ambiguous outcome |
 
 ### Labelling and callbacks

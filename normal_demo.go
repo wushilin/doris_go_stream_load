@@ -48,8 +48,8 @@ password =
 columns = event_time,user_id,event_name
 
 # Optional tuning
+doris_upload_request_timeout_ms = 300000
 doris_upload_timeout_ms = 300000
-upload_timeout_ms = 300000
 poll_timeout_ms = 300000
 data_repeats = 1
 
@@ -148,35 +148,35 @@ func main() {
 		if !loadErr.retriable {
 			fatalf("send failed after %d attempt(s): %v", attempt, loadErr)
 		}
-		if cfg.uploadTimeout <= 0 {
-			fatalf("send failed after %d attempt(s): upload timeout exhausted: %v", attempt, loadErr)
+		if cfg.dorisUploadTimeout <= 0 {
+			fatalf("send failed after %d attempt(s): doris upload timeout exhausted: %v", attempt, loadErr)
 		}
 
 		if loadErr.newLabel {
 			label = generateLabel()
 		}
 		backoff := retryBackoffDelay(attempt)
-		if backoff > cfg.uploadTimeout {
-			backoff = cfg.uploadTimeout
+		if backoff > cfg.dorisUploadTimeout {
+			backoff = cfg.dorisUploadTimeout
 		}
 		fmt.Printf("retrying after %s: %v\n", backoff, loadErr)
 		time.Sleep(backoff)
-		cfg.uploadTimeout -= backoff
+		cfg.dorisUploadTimeout -= backoff
 	}
 }
 
 type demoConfig struct {
-	streamLoadURL      string
-	database           string
-	username           string
-	password           string
-	columns            string
-	dorisUploadTimeout time.Duration
-	uploadTimeout      time.Duration
-	pollTimeout        time.Duration
-	dataRepeats        int
-	rows               []string
-	client             *http.Client
+	streamLoadURL             string
+	database                  string
+	username                  string
+	password                  string
+	columns                   string
+	dorisUploadRequestTimeout time.Duration
+	dorisUploadTimeout        time.Duration
+	pollTimeout               time.Duration
+	dataRepeats               int
+	rows                      []string
+	client                    *http.Client
 }
 
 func parseArgs() (configPath string, printSample bool) {
@@ -211,10 +211,10 @@ func loadConfigFromFile(path string) (demoConfig, error) {
 	defer file.Close()
 
 	cfg := demoConfig{
-		dorisUploadTimeout: 300 * time.Second,
-		uploadTimeout:      300 * time.Second,
-		pollTimeout:        300 * time.Second,
-		dataRepeats:        1,
+		dorisUploadRequestTimeout: 300 * time.Second,
+		dorisUploadTimeout:        300 * time.Second,
+		pollTimeout:               300 * time.Second,
+		dataRepeats:               1,
 	}
 
 	scanner := bufio.NewScanner(file)
@@ -257,18 +257,18 @@ func loadConfigFromFile(path string) (demoConfig, error) {
 			cfg.password = value
 		case "columns":
 			cfg.columns = value
+		case "doris_upload_request_timeout_ms":
+			duration, err := parseMilliseconds(value)
+			if err != nil {
+				return demoConfig{}, fmt.Errorf("%s:%d: %w", path, lineNo, err)
+			}
+			cfg.dorisUploadRequestTimeout = duration
 		case "doris_upload_timeout_ms":
 			duration, err := parseMilliseconds(value)
 			if err != nil {
 				return demoConfig{}, fmt.Errorf("%s:%d: %w", path, lineNo, err)
 			}
 			cfg.dorisUploadTimeout = duration
-		case "upload_timeout_ms":
-			duration, err := parseMilliseconds(value)
-			if err != nil {
-				return demoConfig{}, fmt.Errorf("%s:%d: %w", path, lineNo, err)
-			}
-			cfg.uploadTimeout = duration
 		case "poll_timeout_ms":
 			duration, err := parseMilliseconds(value)
 			if err != nil {
@@ -310,7 +310,7 @@ func loadConfigFromFile(path string) (demoConfig, error) {
 		return demoConfig{}, errors.New("at least one row is required")
 	}
 
-	cfg.client = newDemoHTTPClient(cfg.dorisUploadTimeout)
+	cfg.client = newDemoHTTPClient(cfg.dorisUploadRequestTimeout)
 	return cfg, nil
 }
 

@@ -22,7 +22,7 @@ const (
 	defaultBatchBytes                = maxBatchBytes
 	defaultDorisUploadWorkers        = 1
 	defaultLinger                    = 5 * time.Millisecond
-	defaultUploadTimeout             = 300 * time.Second
+	defaultDorisUploadTimeout        = 300 * time.Second
 	defaultDorisUploadRequestTimeout = 300 * time.Second
 	minDorisUploadRequestTimeout     = 10 * time.Second
 	defaultCallbackTimeout           = 100 * time.Millisecond
@@ -91,7 +91,7 @@ type Config struct {
 	DorisUploadWorkers int
 	Validation         ValidationMode
 
-	UploadTimeout             time.Duration
+	DorisUploadTimeout        time.Duration
 	DorisUploadRequestTimeout time.Duration
 	CallbackTimeout           time.Duration
 	SlowCallbackWarn          time.Duration
@@ -129,8 +129,8 @@ func (c Config) withDefaults() Config {
 	if c.Linger <= 0 {
 		c.Linger = defaultLinger
 	}
-	if c.UploadTimeout == 0 {
-		c.UploadTimeout = defaultUploadTimeout
+	if c.DorisUploadTimeout == 0 {
+		c.DorisUploadTimeout = defaultDorisUploadTimeout
 	}
 	if c.DorisUploadRequestTimeout == 0 {
 		c.DorisUploadRequestTimeout = defaultDorisUploadRequestTimeout
@@ -240,11 +240,11 @@ func (c Config) validate() error {
 	if strings.TrimSpace(c.LabelPrefix) == "" {
 		return errors.New("label prefix cannot be empty")
 	}
-	if c.UploadTimeout <= 0 {
-		return errors.New("upload timeout must be greater than zero")
+	if c.DorisUploadTimeout <= 0 {
+		return errors.New("doris upload timeout must be greater than zero")
 	}
 	if c.DorisUploadRequestTimeout < minDorisUploadRequestTimeout {
-		return errors.New("doris upload timeout must be at least 10 seconds")
+		return errors.New("doris upload request timeout must be at least 10 seconds")
 	}
 	if c.StatusPollTimeout <= 0 {
 		return errors.New("status poll timeout must be greater than zero")

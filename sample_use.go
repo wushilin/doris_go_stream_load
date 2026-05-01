@@ -54,12 +54,12 @@ columns = event_time,user_id,event_name
 mode = csv
 
 # Optional tuning
-doris_upload_timeout_ms = 300000
+doris_upload_request_timeout_ms = 300000
 queue_timeout_ms = 0
 batch_bytes = 1048576
 max_buffered_requests = 1000
 linger_ms = 5
-upload_timeout_ms = 300000
+doris_upload_timeout_ms = 300000
 poll_timeout_ms = 300000
 report_interval_ms = 3000
 threads = 50
@@ -79,31 +79,31 @@ row = {NOW},{ROW_ID},logout
 `
 
 type sampleConfig struct {
-	streamLoadURL       string
-	database            string
-	username            string
-	password            string
-	columns             []string
-	mode                dorisstreamload.Mode
-	dorisUploadTimeout  time.Duration
-	queueTimeout        time.Duration
-	batchBytes          int
-	maxBufferedRequests int
-	linger              time.Duration
-	uploadTimeout       time.Duration
-	pollTimeout         time.Duration
-	reportInterval      time.Duration
-	threads             int
-	senderWorkers       int
-	senderBatchSize     int
-	validation          dorisstreamload.ValidationMode
-	waitMode            waitMode
-	debug               bool
-	fakeSend            bool
-	fakeSendDelay       time.Duration
-	fakeSendDelaySet    bool
-	dataRepeats         int
-	rows                []string
+	streamLoadURL             string
+	database                  string
+	username                  string
+	password                  string
+	columns                   []string
+	mode                      dorisstreamload.Mode
+	dorisUploadRequestTimeout time.Duration
+	queueTimeout              time.Duration
+	batchBytes                int
+	maxBufferedRequests       int
+	linger                    time.Duration
+	dorisUploadTimeout        time.Duration
+	pollTimeout               time.Duration
+	reportInterval            time.Duration
+	threads                   int
+	senderWorkers             int
+	senderBatchSize           int
+	validation                dorisstreamload.ValidationMode
+	waitMode                  waitMode
+	debug                     bool
+	fakeSend                  bool
+	fakeSendDelay             time.Duration
+	fakeSendDelaySet          bool
+	dataRepeats               int
+	rows                      []string
 }
 
 type waitMode string
@@ -283,14 +283,14 @@ func sendPayloadBatch(cfg sampleConfig, client *dorisstreamload.Client, stats *s
 }
 
 func sendPayloadSync(client *dorisstreamload.Client, stats *streamStats, firstLabelPrinted *atomic.Bool, payloads []string, rowCount int, description string) error {
-	handles, err := client.SendBatch(payloads)
+	handle, err := client.SendBatch(payloads)
 	if err != nil {
 		return fmt.Errorf("%s enqueue failed: %w", description, err)
 	}
 	stats.enqueued.Add(int64(rowCount))
 	stats.inFlight.Add(int64(rowCount))
 
-	result := handles[0].Wait()
+	result := handle.Wait()
 	stats.inFlight.Add(-int64(rowCount))
 	if result.Err != nil {
 		return fmt.Errorf("%s failed after %d attempt(s): %w", description, result.Attempts, result.Err)
@@ -455,22 +455,22 @@ func loadConfigFromFile(path string) (sampleConfig, error) {
 	defer file.Close()
 
 	cfg := sampleConfig{
-		dorisUploadTimeout:  300 * time.Second,
-		queueTimeout:        0,
-		batchBytes:          0,
-		maxBufferedRequests: 0,
-		linger:              0,
-		uploadTimeout:       300 * time.Second,
-		pollTimeout:         300 * time.Second,
-		reportInterval:      3 * time.Second,
-		threads:             50,
-		senderWorkers:       1,
-		senderBatchSize:     1,
-		validation:          dorisstreamload.ValidateSyntax,
-		waitMode:            waitModeSync,
-		fakeSendDelay:       500 * time.Millisecond,
-		dataRepeats:         1,
-		mode:                dorisstreamload.ModeCSV,
+		dorisUploadRequestTimeout: 300 * time.Second,
+		queueTimeout:              0,
+		batchBytes:                0,
+		maxBufferedRequests:       0,
+		linger:                    0,
+		dorisUploadTimeout:        300 * time.Second,
+		pollTimeout:               300 * time.Second,
+		reportInterval:            3 * time.Second,
+		threads:                   50,
+		senderWorkers:             1,
+		senderBatchSize:           1,
+		validation:                dorisstreamload.ValidateSyntax,
+		waitMode:                  waitModeSync,
+		fakeSendDelay:             500 * time.Millisecond,
+		dataRepeats:               1,
+		mode:                      dorisstreamload.ModeCSV,
 	}
 
 	scanner := bufio.NewScanner(file)
@@ -527,12 +527,12 @@ func loadConfigFromFile(path string) (sampleConfig, error) {
 				return sampleConfig{}, fmt.Errorf("%s:%d: %w", path, lineNo, err)
 			}
 			cfg.mode = mode
-		case "doris_upload_timeout_ms":
+		case "doris_upload_request_timeout_ms":
 			duration, err := parseMilliseconds(value)
 			if err != nil {
 				return sampleConfig{}, fmt.Errorf("%s:%d: %w", path, lineNo, err)
 			}
-			cfg.dorisUploadTimeout = duration
+			cfg.dorisUploadRequestTimeout = duration
 		case "queue_timeout_ms":
 			duration, err := parseNonNegativeMilliseconds(value)
 			if err != nil {
@@ -557,12 +557,12 @@ func loadConfigFromFile(path string) (sampleConfig, error) {
 				return sampleConfig{}, fmt.Errorf("%s:%d: %w", path, lineNo, err)
 			}
 			cfg.linger = duration
-		case "upload_timeout_ms":
+		case "doris_upload_timeout_ms":
 			duration, err := parseMilliseconds(value)
 			if err != nil {
 				return sampleConfig{}, fmt.Errorf("%s:%d: %w", path, lineNo, err)
 			}
-			cfg.uploadTimeout = duration
+			cfg.dorisUploadTimeout = duration
 		case "poll_timeout_ms":
 			duration, err := parseMilliseconds(value)
 			if err != nil {
@@ -676,12 +676,12 @@ func dorisConfig(cfg sampleConfig) dorisstreamload.Config {
 		Database:                  cfg.database,
 		Columns:                   cfg.columns,
 		Mode:                      cfg.mode,
-		DorisUploadRequestTimeout: cfg.dorisUploadTimeout,
+		DorisUploadRequestTimeout: cfg.dorisUploadRequestTimeout,
 		MaxQueueWaitTime:          cfg.queueTimeout,
 		BatchBytes:                cfg.batchBytes,
 		MaxQueueSize:              cfg.maxBufferedRequests,
 		Linger:                    cfg.linger,
-		UploadTimeout:             cfg.uploadTimeout,
+		DorisUploadTimeout:        cfg.dorisUploadTimeout,
 		StatusPollTimeout:         cfg.pollTimeout,
 		DorisUploadWorkers:        cfg.senderWorkers,
 		Validation:                cfg.validation,
@@ -690,7 +690,7 @@ func dorisConfig(cfg sampleConfig) dorisstreamload.Config {
 		FakeSendDelaySet:          cfg.fakeSendDelaySet,
 		LogLevel:                  logLevel,
 		Logger:                    log.Default(),
-		HTTPClient:                newSampleHTTPClient(cfg.dorisUploadTimeout),
+		HTTPClient:                newSampleHTTPClient(cfg.dorisUploadRequestTimeout),
 	}
 	if cfg.username != "" || cfg.password != "" {
 		dorisCfg.AuthenticationType = dorisstreamload.AuthenticationBasic

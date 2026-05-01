@@ -35,8 +35,8 @@ func TestLoaderConfigConvertsToRuntimeConfig(t *testing.T) {
 	if cfg.Linger != 250*time.Millisecond {
 		t.Fatalf("Linger = %s, want 250ms", cfg.Linger)
 	}
-	if cfg.UploadTimeout != 100*time.Second {
-		t.Fatalf("DorisUploadTimeout = %s, want 100s", cfg.UploadTimeout)
+	if cfg.DorisUploadTimeout != 100*time.Second {
+		t.Fatalf("DorisUploadTimeout = %s, want 100s", cfg.DorisUploadTimeout)
 	}
 	if cfg.DorisUploadRequestTimeout != 30*time.Second {
 		t.Fatalf("DorisUploadRequestTimeout = %s, want 30s", cfg.DorisUploadRequestTimeout)

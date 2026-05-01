@@ -209,14 +209,10 @@ func newClientWithSender(cfg Config, s sender) *Client {
 }
 
 func (c *Client) Send(record string) (*Handle, error) {
-	handles, err := c.SendBatch([]string{record})
-	if err != nil {
-		return nil, err
-	}
-	return handles[0], nil
+	return c.SendBatch([]string{record})
 }
 
-func (c *Client) SendBatch(records []string) ([]*Handle, error) {
+func (c *Client) SendBatch(records []string) (*Handle, error) {
 	ctx := context.Background()
 	var cancel context.CancelFunc
 	if c.cfg.MaxQueueWaitTime > 0 {
@@ -226,7 +222,7 @@ func (c *Client) SendBatch(records []string) ([]*Handle, error) {
 	return c.sendRecords(ctx, records)
 }
 
-func (c *Client) SendBatchContext(ctx context.Context, records []string) ([]*Handle, error) {
+func (c *Client) SendBatchContext(ctx context.Context, records []string) (*Handle, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -234,14 +230,10 @@ func (c *Client) SendBatchContext(ctx context.Context, records []string) ([]*Han
 }
 
 func (c *Client) SendWithCallback(callback DeliveryCallback, record string) (*Handle, error) {
-	handles, err := c.SendBatchWithCallback(callback, []string{record})
-	if err != nil {
-		return nil, err
-	}
-	return handles[0], nil
+	return c.SendBatchWithCallback(callback, []string{record})
 }
 
-func (c *Client) SendBatchWithCallback(callback DeliveryCallback, records []string) ([]*Handle, error) {
+func (c *Client) SendBatchWithCallback(callback DeliveryCallback, records []string) (*Handle, error) {
 	ctx := context.Background()
 	var cancel context.CancelFunc
 	if c.cfg.MaxQueueWaitTime > 0 {
@@ -251,15 +243,15 @@ func (c *Client) SendBatchWithCallback(callback DeliveryCallback, records []stri
 	return c.sendRecords(ctx, records, WithCallback(callback))
 }
 
-func (c *Client) SendRecord(records ...string) ([]*Handle, error) {
+func (c *Client) SendRecord(records ...string) (*Handle, error) {
 	return c.SendBatch(records)
 }
 
-func (c *Client) SendRecordContext(ctx context.Context, records ...string) ([]*Handle, error) {
+func (c *Client) SendRecordContext(ctx context.Context, records ...string) (*Handle, error) {
 	return c.SendBatchContext(ctx, records)
 }
 
-func (c *Client) SendRecordWithCallback(callback DeliveryCallback, records ...string) ([]*Handle, error) {
+func (c *Client) SendRecordWithCallback(callback DeliveryCallback, records ...string) (*Handle, error) {
 	return c.SendBatchWithCallback(callback, records)
 }
 
@@ -293,7 +285,7 @@ func (c *Client) Stats() ClientStats {
 	return c.stats.snapshot(c.cfg.DorisUploadWorkers)
 }
 
-func (c *Client) sendRecords(ctx context.Context, records []string, opts ...SendOption) ([]*Handle, error) {
+func (c *Client) sendRecords(ctx context.Context, records []string, opts ...SendOption) (*Handle, error) {
 	if len(records) == 0 {
 		return nil, errors.New("at least one record is required")
 	}
@@ -304,15 +296,15 @@ func (c *Client) sendRecords(ctx context.Context, records []string, opts ...Send
 	}
 
 	items := make([]*queueItem, 0, len(records))
-	handles := make([]*Handle, 0, len(records))
+	handle := newHandle()
 	payloadBytes := 0
 	for _, record := range records {
 		item, err := c.prepareItem(record)
 		if err != nil {
 			return nil, err
 		}
+		item.handle = handle
 		items = append(items, item)
-		handles = append(handles, item.handle)
 		payloadBytes += item.byteSize
 	}
 	submission := newQueuedSubmission(c.cfg.Mode, items, payloadBytes, sendOpts.callback)
@@ -333,7 +325,7 @@ func (c *Client) sendRecords(ctx context.Context, records []string, opts ...Send
 	for _, item := range items {
 		c.logf(LogLevelDebug, "message enqueued: mode=%s bytes=%d", c.cfg.Mode, item.byteSize)
 	}
-	return handles, nil
+	return handle, nil
 }
 
 func newQueuedSubmission(mode Mode, items []*queueItem, payloadBytes int, callback DeliveryCallback) *queuedSubmission {
@@ -364,7 +356,6 @@ func (c *Client) prepareItem(record string) (*queueItem, error) {
 
 	item := &queueItem{
 		payload: record,
-		handle:  newHandle(),
 	}
 
 	switch c.cfg.Mode {
@@ -495,7 +486,7 @@ func (c *Client) deliverBatch(batch *deliveryBatch) {
 	for {
 		if attempts > 0 && !retryDeadline.IsZero() && time.Now().After(retryDeadline) {
 			result := DeliveryResult{
-				Err:        &streamLoadError{StatusCode: outcome.statusCode, Message: fmt.Sprintf("upload did not conclude within upload timeout %s", c.cfg.UploadTimeout)},
+				Err:        &streamLoadError{StatusCode: outcome.statusCode, Message: fmt.Sprintf("upload did not conclude within doris upload timeout %s", c.cfg.DorisUploadTimeout)},
 				Attempts:   attempts,
 				StatusCode: outcome.statusCode,
 				Response:   outcome.response,
@@ -555,11 +546,11 @@ func (c *Client) deliverBatch(batch *deliveryBatch) {
 		}
 
 		if retryDeadline.IsZero() {
-			retryDeadline = time.Now().Add(c.cfg.UploadTimeout)
+			retryDeadline = time.Now().Add(c.cfg.DorisUploadTimeout)
 		}
 		if time.Now().After(retryDeadline) {
 			result := DeliveryResult{
-				Err:        &streamLoadError{StatusCode: outcome.statusCode, Message: fmt.Sprintf("upload did not conclude within upload timeout %s", c.cfg.UploadTimeout)},
+				Err:        &streamLoadError{StatusCode: outcome.statusCode, Message: fmt.Sprintf("upload did not conclude within doris upload timeout %s", c.cfg.DorisUploadTimeout)},
 				Attempts:   attempts,
 				StatusCode: outcome.statusCode,
 				Response:   outcome.response,

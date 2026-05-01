@@ -86,7 +86,7 @@ func LoaderConfigFromConfig(cfg Config) LoaderConfig {
 		MaxQueueWaitTime:          formatDuration(cfg.MaxQueueWaitTime),
 		DorisUploadWorkers:        cfg.DorisUploadWorkers,
 		Validation:                cfg.Validation,
-		DorisUploadTimeout:        formatDuration(cfg.UploadTimeout),
+		DorisUploadTimeout:        formatDuration(cfg.DorisUploadTimeout),
 		DorisUploadRequestTimeout: formatDuration(cfg.DorisUploadRequestTimeout),
 		CallbackTimeout:           formatDuration(cfg.CallbackTimeout),
 		SlowCallbackWarn:          formatDuration(cfg.SlowCallbackWarn),
@@ -136,7 +136,7 @@ func (lc LoaderConfig) Config() (Config, error) {
 	if cfg.MaxQueueWaitTime, err = parseOptionalDuration("max_queue_wait_time", lc.MaxQueueWaitTime); err != nil {
 		return Config{}, err
 	}
-	if cfg.UploadTimeout, err = parseOptionalDuration("doris_upload_timeout", lc.DorisUploadTimeout); err != nil {
+	if cfg.DorisUploadTimeout, err = parseOptionalDuration("doris_upload_timeout", lc.DorisUploadTimeout); err != nil {
 		return Config{}, err
 	}
 	if cfg.DorisUploadRequestTimeout, err = parseOptionalDuration("doris_upload_request_timeout", lc.DorisUploadRequestTimeout); err != nil {
