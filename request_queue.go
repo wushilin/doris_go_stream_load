@@ -45,16 +45,18 @@ func (q *requestQueue) Enqueue(ctx context.Context, submission *queuedSubmission
 		return ErrQueueFull
 	}
 
-	select {
-	case q.items <- submission:
-		return nil
-	case <-q.closeC:
+	// Hold the mutex to make "check closed" and "write to items" atomic with
+	// respect to Close(). The write is non-blocking because acquiring a slot
+	// above guarantees buffer space in q.items.
+	q.mu.Lock()
+	if q.closed {
+		q.mu.Unlock()
 		<-q.slots
 		return ErrClientClosed
-	case <-ctx.Done():
-		<-q.slots
-		return ErrQueueFull
 	}
+	q.items <- submission
+	q.mu.Unlock()
+	return nil
 }
 
 func (q *requestQueue) DequeueBatch(maxBytes int) ([]*queuedSubmission, int, bool) {

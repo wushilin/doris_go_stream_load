@@ -153,6 +153,8 @@ func (b *deliveryBatch) headerFormat() string {
 type Client struct {
 	cfg Config
 
+	validator recordValidator
+
 	intake   *requestQueue
 	dispatch chan *deliveryBatch
 	sender   sender
@@ -191,13 +193,14 @@ func NewClient(cfg Config) (*Client, error) {
 
 func newClientWithSender(cfg Config, s sender) *Client {
 	c := &Client{
-		cfg:      cfg,
-		intake:   newRequestQueue(cfg.MaxQueueSize),
-		dispatch: make(chan *deliveryBatch, cfg.MaxUploadQueueSize),
-		sender:   s,
-		stats:    newClientStatsCollector(time.Now()),
-		closing:  make(chan struct{}),
-		closed:   make(chan struct{}),
+		cfg:       cfg,
+		validator: newRecordValidator(cfg),
+		intake:    newRequestQueue(cfg.MaxQueueSize),
+		dispatch:  make(chan *deliveryBatch, cfg.MaxUploadQueueSize),
+		sender:    s,
+		stats:     newClientStatsCollector(time.Now()),
+		closing:   make(chan struct{}),
+		closed:    make(chan struct{}),
 	}
 	c.wg.Add(1)
 	go c.runBatcher()
@@ -354,25 +357,22 @@ func (c *Client) prepareItem(record string) (*queueItem, error) {
 		return nil, errors.New("record cannot be empty")
 	}
 
+	validator := c.validator
+	if validator == nil {
+		validator = newRecordValidator(c.cfg)
+	}
+	if err := validator.validate(record); err != nil {
+		return nil, err
+	}
+
 	item := &queueItem{
-		payload: record,
+		payload:  record,
+		byteSize: len(record),
 	}
 
 	switch c.cfg.Mode {
 	case ModeCSV:
-		if c.cfg.Validation != ValidateNone {
-			if err := validateCSVRecord(record, len(c.cfg.Columns)); err != nil {
-				return nil, err
-			}
-		}
-		item.byteSize = len(record)
 	case ModeJSON:
-		if c.cfg.Validation != ValidateNone {
-			if err := validateJSONRecord(record, c.cfg.Columns, c.cfg.Validation == ValidateStrict); err != nil {
-				return nil, err
-			}
-		}
-		item.byteSize = len(record)
 	default:
 		return nil, fmt.Errorf("unsupported mode %q", c.cfg.Mode)
 	}
@@ -663,19 +663,76 @@ func joinJSONRecordsByteSize(records []string) int {
 	return size
 }
 
-func validateCSVRecord(record string, expectedColumns int) error {
-	reader := csv.NewReader(strings.NewReader(record))
-	reader.FieldsPerRecord = expectedColumns
-	reader.ReuseRecord = false
+type recordValidator interface {
+	validate(record string) error
+}
 
-	row, err := reader.Read()
+type noOpRecordValidator struct{}
+
+func (noOpRecordValidator) validate(string) error {
+	return nil
+}
+
+func newRecordValidator(cfg Config) recordValidator {
+	if cfg.Validation == ValidateNone {
+		return noOpRecordValidator{}
+	}
+	switch cfg.Mode {
+	case ModeCSV:
+		return newCSVRecordValidator(len(cfg.Columns))
+	case ModeJSON:
+		return newJSONRecordValidator(cfg.Columns, cfg.Validation == ValidateStrict)
+	default:
+		return noOpRecordValidator{}
+	}
+}
+
+type csvRecordValidator struct {
+	expectedColumns int
+	pool            sync.Pool
+}
+
+func newCSVRecordValidator(expectedColumns int) *csvRecordValidator {
+	validator := &csvRecordValidator{expectedColumns: expectedColumns}
+	validator.pool.New = func() any {
+		return newCSVRecordParser(expectedColumns)
+	}
+	return validator
+}
+
+func (v *csvRecordValidator) validate(record string) error {
+	parser := v.pool.Get().(*csvRecordParser)
+	err := parser.validate(record)
+	if err == nil {
+		v.pool.Put(parser)
+	}
+	return err
+}
+
+type csvRecordParser struct {
+	source strings.Reader
+	reader *csv.Reader
+}
+
+func newCSVRecordParser(expectedColumns int) *csvRecordParser {
+	parser := &csvRecordParser{}
+	parser.reader = csv.NewReader(&parser.source)
+	parser.reader.FieldsPerRecord = expectedColumns
+	parser.reader.ReuseRecord = true
+	return parser
+}
+
+func (p *csvRecordParser) validate(record string) error {
+	p.source.Reset(record)
+
+	row, err := p.reader.Read()
 	if err != nil {
 		return fmt.Errorf("invalid csv record: %w", err)
 	}
-	if len(row) != expectedColumns {
-		return fmt.Errorf("invalid csv record: expected %d columns, got %d", expectedColumns, len(row))
+	if len(row) != p.reader.FieldsPerRecord {
+		return fmt.Errorf("invalid csv record: expected %d columns, got %d", p.reader.FieldsPerRecord, len(row))
 	}
-	if _, err := reader.Read(); !errors.Is(err, io.EOF) {
+	if _, err := p.reader.Read(); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return errors.New("invalid csv record: expected exactly one row")
 		}
@@ -684,39 +741,46 @@ func validateCSVRecord(record string, expectedColumns int) error {
 	return nil
 }
 
-func validateJSONRecord(record string, columns []string, strict bool) error {
-	if !json.Valid([]byte(record)) {
-		return errors.New("invalid json record payload")
-	}
+type jsonRecordValidator struct {
+	strict    bool
+	columns   []string
+	columnSet map[string]struct{}
+}
 
+func newJSONRecordValidator(columns []string, strict bool) *jsonRecordValidator {
+	validator := &jsonRecordValidator{strict: strict}
+	if strict {
+		validator.columns = append([]string(nil), columns...)
+		validator.columnSet = make(map[string]struct{}, len(columns))
+		for _, column := range columns {
+			validator.columnSet[column] = struct{}{}
+		}
+	}
+	return validator
+}
+
+func (v *jsonRecordValidator) validate(record string) error {
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(record), &object); err != nil {
-		return fmt.Errorf("invalid json object payload: %w", err)
+		return fmt.Errorf("invalid json record payload: %w", err)
 	}
 	if object == nil {
 		return errors.New("invalid json object payload: expected JSON object")
 	}
-	if !strict {
+	if !v.strict {
 		return nil
 	}
 
-	if len(object) != len(columns) {
-		return fmt.Errorf("invalid json object payload: expected exactly %d columns, got %d", len(columns), len(object))
+	if len(object) != len(v.columns) {
+		return fmt.Errorf("invalid json object payload: expected exactly %d columns, got %d", len(v.columns), len(object))
 	}
-	for _, column := range columns {
+	for _, column := range v.columns {
 		if _, ok := object[column]; !ok {
 			return fmt.Errorf("invalid json object payload: missing column %q", column)
 		}
 	}
 	for key := range object {
-		found := false
-		for _, column := range columns {
-			if column == key {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if _, ok := v.columnSet[key]; !ok {
 			return fmt.Errorf("invalid json object payload: unexpected column %q", key)
 		}
 	}
