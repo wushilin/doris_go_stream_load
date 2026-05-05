@@ -59,6 +59,8 @@ type ClientStats struct {
 	TotalUploadAttempts int64
 }
 
+const maxLoadDurations = 10000
+
 type clientStatsCollector struct {
 	startedAt time.Time
 
@@ -73,12 +75,13 @@ type clientStatsCollector struct {
 
 	mu            sync.Mutex
 	loadDurations []time.Duration
+	durIdx        int
 }
 
 func newClientStatsCollector(startedAt time.Time) *clientStatsCollector {
 	return &clientStatsCollector{
 		startedAt:     startedAt,
-		loadDurations: make([]time.Duration, 0, 128),
+		loadDurations: make([]time.Duration, 0, maxLoadDurations),
 	}
 }
 
@@ -104,7 +107,12 @@ func (s *clientStatsCollector) recordCompletion(result DeliveryResult) {
 		duration := result.FinishedAt.Sub(result.StartedAt)
 		s.totalLoadTimeNanos.Add(duration.Nanoseconds())
 		s.mu.Lock()
-		s.loadDurations = append(s.loadDurations, duration)
+		if len(s.loadDurations) < maxLoadDurations {
+			s.loadDurations = append(s.loadDurations, duration)
+		} else {
+			s.loadDurations[s.durIdx] = duration
+			s.durIdx = (s.durIdx + 1) % maxLoadDurations
+		}
 		s.mu.Unlock()
 	}
 }
