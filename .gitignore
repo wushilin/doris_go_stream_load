@@ -31,5 +31,6 @@ go.work.sum
 # .idea/
 # .vscode/
 *.conf
+!benchmark_demo.conf
 sample_use
 example/doris_go_stream_load_example

@@ -29,15 +29,24 @@ const sampleConfig = `# normal_demo config
 
 /*
 Example Doris table:
-CREATE TABLE example_table (
-  event_time DATETIME,
-  user_id BIGINT,
-  event_name STRING
+CREATE DATABASE IF NOT EXISTS example_db;
+
+CREATE TABLE IF NOT EXISTS example_db.example_table (
+  event_time DATETIME NOT NULL,
+  user_id BIGINT NOT NULL,
+  event_name VARCHAR(64) NOT NULL
 )
 DUPLICATE KEY(event_time, user_id)
+PARTITION BY RANGE(event_time) ()
 DISTRIBUTED BY HASH(user_id) BUCKETS 8
 PROPERTIES (
-  "replication_num" = "1"
+  "dynamic_partition.enable" = "true",
+  "dynamic_partition.time_unit" = "DAY",
+  "dynamic_partition.start" = "-30",
+  "dynamic_partition.end" = "3",
+  "dynamic_partition.prefix" = "p",
+  "replication_num" = "1",
+  "compression" = "zstd"
 );
 */
 

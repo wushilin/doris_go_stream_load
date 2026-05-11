@@ -1,8 +1,9 @@
 module doris_go_stream_load_example
 
-go 1.26
+go 1.20
 
-require github.com/wushilin/doris_go_stream_load v0.0.0
-require golang.org/x/crypto v0.50.0 // indirect
+require github.com/wushilin/doris_go_stream_load v1.0.0
+
+require golang.org/x/crypto v0.33.0 // indirect
 
 replace github.com/wushilin/doris_go_stream_load => ..

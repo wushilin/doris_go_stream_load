@@ -23,6 +23,8 @@ The example covers:
 - group handle checking
 - reading `client.Stats()`
 
+For throughput and batching experiments, use the repository-level `benchmark_demo.go` with `benchmark_demo.conf` instead. This folder is intentionally the simple integration example.
+
 ## Run
 
 ```sh

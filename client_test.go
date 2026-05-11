@@ -373,6 +373,23 @@ func TestFakeSendDelayDefaultAndExplicitZero(t *testing.T) {
 	}
 }
 
+func TestLogLevelErrorCanBeExplicitlyConfigured(t *testing.T) {
+	cfg := Config{
+		StreamLoadURL:             "http://example.invalid/api/db/t/_stream_load",
+		Columns:                   []string{"c1"},
+		Mode:                      ModeCSV,
+		FakeSend:                  true,
+		DorisUploadRequestTimeout: 30 * time.Second,
+		DorisUploadTimeout:        30 * time.Second,
+		LogLevel:                  LogLevelError,
+		LogLevelSet:               true,
+	}.withDefaults()
+
+	if cfg.LogLevel != LogLevelError {
+		t.Fatalf("LogLevel = %d, want LogLevelError", cfg.LogLevel)
+	}
+}
+
 func TestBatcherLingersForNonFullBatch(t *testing.T) {
 	sender := &fakeSender{}
 	client := newTestClient(t, sender, Config{

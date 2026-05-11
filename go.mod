@@ -1,5 +1,5 @@
-module doris_go_stream_load
+module github.com/wushilin/doris_go_stream_load
 
-go 1.18.0
+go 1.20
 
 require golang.org/x/crypto v0.33.0

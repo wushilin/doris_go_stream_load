@@ -23,6 +23,8 @@ func TestLoaderConfigConvertsToRuntimeConfig(t *testing.T) {
 		Validation:                ValidateSyntax,
 		TLSSkipVerify:             true,
 		TLSCACertPath:             "/tmp/test-ca.pem",
+		LogLevel:                  LogLevelError,
+		LogLevelSet:               true,
 	}
 
 	cfg, err := loader.Config()
@@ -58,6 +60,9 @@ func TestLoaderConfigConvertsToRuntimeConfig(t *testing.T) {
 	}
 	if !cfg.FakeSendDelaySet {
 		t.Fatal("FakeSendDelaySet = false, want true")
+	}
+	if cfg.LogLevel != LogLevelError || !cfg.LogLevelSet {
+		t.Fatalf("log level = %d set=%t, want error set=true", cfg.LogLevel, cfg.LogLevelSet)
 	}
 	if !reflect.DeepEqual(cfg.Columns, []string{"c1", "c2"}) {
 		t.Fatalf("Columns = %#v", cfg.Columns)

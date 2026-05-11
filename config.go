@@ -109,6 +109,9 @@ type Config struct {
 
 	Logger   Logger
 	LogLevel LogLevel
+	// LogLevelSet distinguishes an explicit LogLevelError from the zero-value
+	// default path. Non-zero log levels are treated as explicitly configured.
+	LogLevelSet bool
 
 	HTTPClient *http.Client
 }
@@ -165,7 +168,7 @@ func (c Config) withDefaults() Config {
 	if c.AuthenticationType == "" {
 		c.AuthenticationType = AuthenticationNone
 	}
-	if c.LogLevel == 0 {
+	if !c.LogLevelSet && c.LogLevel == 0 {
 		c.LogLevel = defaultLogLevel
 	}
 	if c.Headers == nil {

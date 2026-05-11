@@ -44,7 +44,8 @@ type LoaderConfig struct {
 	TLSSkipVerify bool   `json:"tls_skip_verify,omitempty"`
 	TLSCACertPath string `json:"tls_ca_cert_path,omitempty"`
 
-	LogLevel LogLevel `json:"log_level,omitempty"`
+	LogLevel    LogLevel `json:"log_level,omitempty"`
+	LogLevelSet bool     `json:"log_level_set,omitempty"`
 }
 
 func LoadLoaderConfig(path string) (LoaderConfig, error) {
@@ -100,6 +101,7 @@ func LoaderConfigFromConfig(cfg Config) LoaderConfig {
 		TLSSkipVerify:             cfg.TLSSkipVerify,
 		TLSCACertPath:             cfg.TLSCACertPath,
 		LogLevel:                  cfg.LogLevel,
+		LogLevelSet:               cfg.LogLevelSet || cfg.LogLevel != 0,
 	}
 }
 
@@ -125,6 +127,7 @@ func (lc LoaderConfig) Config() (Config, error) {
 		TLSSkipVerify:       lc.TLSSkipVerify,
 		TLSCACertPath:       lc.TLSCACertPath,
 		LogLevel:            lc.LogLevel,
+		LogLevelSet:         lc.LogLevelSet || lc.LogLevel != 0,
 		FakeSend:            lc.FakeSend,
 		FakeSendDelaySet:    lc.FakeSendDelay != "" || lc.FakeSendDelaySet,
 	}

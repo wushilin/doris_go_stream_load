@@ -1,151 +1,178 @@
-# Doris Stream Load Go Library
+# Doris Stream Load Go SDK
 
-`dorisstreamload` is a Go library for streaming CSV rows or JSON objects into Apache Doris.
+`dorisstreamload` is a Go SDK for sending CSV rows or JSON objects to Apache Doris Stream Load.
 
-The public model is intentionally small:
+It keeps the public model small:
 
-- two modes: `csv` and `json`
+- `ModeCSV` and `ModeJSON`
 - string input only
 - `Send(...)` for one item
 - `SendBatch(...)` for many items
-- batching, retries, queueing, label polling, and delivery tracking are handled inside the library
+- batching, queueing, retry, label polling, callback, handle, and stats are handled inside the SDK
+
+## Requirements
+
+Go `1.20` or newer.
 
 ## Install
 
 ```sh
-go get <module-path>
+go get github.com/wushilin/doris_go_stream_load@v1.0.0
 ```
 
-Replace `<module-path>` with the module path for this repo.
+Import path:
 
-## Quick Start
+```go
+import dorisstreamload "github.com/wushilin/doris_go_stream_load"
+```
 
-### CSV example
+For v1.x releases, keep the import path as `github.com/wushilin/doris_go_stream_load`; Go modules do not add `/v1` to the path.
+
+## FakeSend Quick Start
+
+This example is local runnable. It does not require a Doris cluster because `FakeSend: true` bypasses real HTTP upload and returns a successful Stream Load result.
+
+```sh
+mkdir dorisstreamload-quickstart
+cd dorisstreamload-quickstart
+go mod init quickstart
+go get github.com/wushilin/doris_go_stream_load@v1.0.0
+```
+
+Create `main.go`:
+
+```go
+package main
+
+import (
+	"fmt"
+	"time"
+
+	dorisstreamload "github.com/wushilin/doris_go_stream_load"
+)
+
+func main() {
+	client, err := dorisstreamload.NewClient(dorisstreamload.Config{
+		StreamLoadURL:             "http://example.invalid/api/demo/events/_stream_load",
+		Columns:                   []string{"event_time", "user_id", "event_name"},
+		Mode:                      dorisstreamload.ModeCSV,
+		Validation:                dorisstreamload.ValidateSyntax,
+		BatchBytes:                1024 * 1024,
+		Linger:                    10 * time.Millisecond,
+		DorisUploadWorkers:        1,
+		DorisUploadRequestTimeout: 30 * time.Second,
+		DorisUploadTimeout:        30 * time.Second,
+		FakeSend:                  true,
+		FakeSendDelay:             20 * time.Millisecond,
+		FakeSendDelaySet:          true,
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer client.Close()
+
+	handle, err := client.SendBatch([]string{
+		"2026-05-01T10:00:00Z,1,login",
+		"2026-05-01T10:00:01Z,2,logout",
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	result := handle.Wait()
+	if result.Err != nil {
+		panic(result.Err)
+	}
+
+	fmt.Printf("success label=%s attempts=%d records=%d\n",
+		result.Response.Label,
+		result.Attempts,
+		client.Stats().RecordsSent,
+	)
+}
+```
+
+Run it:
+
+```sh
+go run .
+```
+
+The repository also contains:
+
+- `example/`: simple runnable FakeSend examples for CSV, JSON, callbacks, handles, and stats
+- `benchmark_demo.go` plus `benchmark_demo.conf`: a larger benchmark-style demo for throughput, wait modes, batching, callbacks, and periodic stats
+- `normal_demo.go`: a plain Doris Stream Load lifecycle demo without this SDK
+
+## Real Doris Cluster
+
+For a real cluster, create a table first. The following DDL assumes append-only event data, common time-range queries, and a small/general-purpose cluster. Tune partitions, buckets, and replication for your own data volume and cluster size.
+
+```sql
+CREATE DATABASE IF NOT EXISTS demo;
+
+CREATE TABLE IF NOT EXISTS demo.events (
+    event_time DATETIME NOT NULL,
+    user_id BIGINT NOT NULL,
+    event_name VARCHAR(64) NOT NULL
+)
+DUPLICATE KEY(event_time, user_id)
+PARTITION BY RANGE(event_time) ()
+DISTRIBUTED BY HASH(user_id) BUCKETS 8
+PROPERTIES (
+    "dynamic_partition.enable" = "true",
+    "dynamic_partition.time_unit" = "DAY",
+    "dynamic_partition.start" = "-30",
+    "dynamic_partition.end" = "3",
+    "dynamic_partition.prefix" = "p",
+    "replication_num" = "1",
+    "compression" = "zstd"
+);
+```
+
+Then configure the SDK with either a full Stream Load URL:
 
 ```go
 client, err := dorisstreamload.NewClient(dorisstreamload.Config{
-	StreamLoadURL:       "http://doris.example.com/api/analytics/events/_stream_load",
+	StreamLoadURL:       "http://127.0.0.1:8030/api/demo/events/_stream_load",
 	Columns:             []string{"event_time", "user_id", "event_name"},
 	Mode:                dorisstreamload.ModeCSV,
-	Validation:          dorisstreamload.ValidateSyntax,
 	AuthenticationType:  dorisstreamload.AuthenticationBasic,
-	AuthenticationToken: "stream_user:stream_password",
-	BatchBytes:          4 * 1024 * 1024,
-	Linger:              200 * time.Millisecond,
-	DorisUploadWorkers:  4,
+	AuthenticationToken: "root:password",
 })
-if err != nil {
-	panic(err)
-}
-defer client.Close()
-
-handle, err := client.Send(`2026-04-28T10:00:00Z,42,login`)
-if err != nil {
-	panic(err)
-}
-
-result := handle.Wait()
-if result.Err != nil {
-	panic(result.Err)
-}
 ```
 
-### JSON example
+Or configure endpoint, database, and table separately:
 
 ```go
 client, err := dorisstreamload.NewClient(dorisstreamload.Config{
-	StreamLoadURL:       "http://doris.example.com/api/analytics/events/_stream_load",
-	Columns:             []string{"event_time", "user_id", "payload"},
+	Endpoint:            "http://127.0.0.1:8030",
+	Database:            "demo",
+	Table:               "events",
+	Columns:             []string{"event_time", "user_id", "event_name"},
 	Mode:                dorisstreamload.ModeJSON,
-	Validation:          dorisstreamload.ValidateSyntax,
 	AuthenticationType:  dorisstreamload.AuthenticationBasic,
-	AuthenticationToken: "stream_user:stream_password",
-	BatchBytes:          4 * 1024 * 1024,
-	Linger:              300 * time.Millisecond,
-	DorisUploadWorkers:  2,
+	AuthenticationToken: "root:password",
 })
-if err != nil {
-	panic(err)
-}
-defer client.Close()
-
-handle, err := client.SendBatch([]string{
-	`{"event_time":"2026-04-28T10:00:00Z","user_id":42,"payload":"a"}`,
-	`{"event_time":"2026-04-28T10:00:01Z","user_id":43,"payload":"b"}`,
-})
-if err != nil {
-	panic(err)
-}
-
-if result := handle.Wait(); result.Err != nil {
-	panic(result.Err)
-}
 ```
 
-### Callback example
+For basic auth, use `AuthenticationToken: "user:password"`. If Doris does not require auth, leave `AuthenticationType` and `AuthenticationToken` empty.
 
-```go
-_, err := client.SendBatchWithCallback(
-	func(result dorisstreamload.DeliveryResult) {
-		if result.Err != nil {
-			log.Printf("delivery failed after %d attempt(s): %v", result.Attempts, result.Err)
-			return
-		}
-		log.Printf("label=%s delivered", result.Response.Label)
-	},
-	[]string{
-		`1,alice,ok`,
-		`2,bob,ok`,
-	},
-)
-if err != nil {
-	panic(err)
-}
-```
-
-## Public API
-
-Primary methods:
-
-- `Send(record string) (*Handle, error)`
-- `SendBatch(records []string) (*Handle, error)`
-- `SendWithCallback(callback DeliveryCallback, record string) (*Handle, error)`
-- `SendBatchWithCallback(callback DeliveryCallback, records []string) (*Handle, error)`
-- `SendBatchContext(ctx context.Context, records []string) (*Handle, error)`
-- `Close() error`
-
-## Input Model
+## CSV And JSON
 
 Each submitted string is one logical item.
 
-In `ModeCSV`:
-
-- one string = one CSV row
-
-In `ModeJSON`:
-
-- one string = one JSON object
-
-Examples:
+In `ModeCSV`, one string is one CSV row:
 
 ```go
-client.Send(`1,alice,ok`)
-client.Send(`{"id":1,"name":"alice"}`)
+client.Send("2026-05-01T10:00:00Z,1,login")
+client.SendBatch([]string{
+	"2026-05-01T10:00:01Z,2,logout",
+	"2026-05-01T10:00:02Z,3,purchase",
+})
 ```
 
-`SendBatch([]string{...})` is one submitted batch containing multiple logical items.
-
-`SendBatch(...)` returns one shared `Handle`, because that submitted batch stays whole and concludes as one Doris load outcome.
-
-The library may merge several submitted batches into one outbound Doris stream-load request, but it does not split one submitted batch across multiple Doris requests.
-
-## Modes
-
-### `ModeCSV`
-
-Each item is one CSV row.
-
-Coalesced outbound body shape:
+When several CSV items are coalesced into one outbound Doris request, the body is newline joined:
 
 ```text
 row1
@@ -153,245 +180,50 @@ row2
 row3
 ```
 
-### `ModeJSON`
+In `ModeJSON`, one string is one JSON object:
 
-Each item is one JSON object.
+```go
+client.Send(`{"event_time":"2026-05-01T10:00:00Z","user_id":1,"event_name":"login"}`)
+client.SendBatch([]string{
+	`{"event_time":"2026-05-01T10:00:01Z","user_id":2,"event_name":"logout"}`,
+	`{"event_time":"2026-05-01T10:00:02Z","user_id":3,"event_name":"purchase"}`,
+})
+```
 
-Coalesced outbound body shape:
+When several JSON items are coalesced into one outbound Doris request, the body is one JSON array:
 
 ```json
 [{"id":1},{"id":2},{"id":3}]
 ```
 
-## Validation
+Validation is controlled by `Config.Validation`:
 
-Validation mode is controlled by `Config.Validation`.
+| Value | CSV behavior | JSON behavior |
+|---|---|---|
+| `ValidateNone` | No parsing before queue admission | No parsing before queue admission |
+| `ValidateSyntax` | Non-blank, parses as one row, field count matches `Columns` | Non-blank, valid JSON object |
+| `ValidateStrict` | Same as syntax today | Valid object, every configured column present, no extra keys |
 
-Options:
+CSV formatting defaults to separator `,` and quote `"`. Override with `CSVSeparator` and `CSVQuote`.
 
-- `ValidateNone`
-- `ValidateSyntax`
-- `ValidateStrict`
+## Callback, Handle, Stats
 
-Default:
-
-```go
-Validation: dorisstreamload.ValidateSyntax
-```
-
-### `ValidateNone`
-
-The library trusts the caller input.
-
-- CSV: no CSV parsing
-- JSON: no JSON parsing
-
-### `ValidateSyntax`
-
-Checks structural correctness before queue admission.
-
-CSV checks:
-
-- input is not blank
-- parses as exactly one CSV row
-- field count matches `len(Columns)`
-- malformed quoting and escaping are rejected
-
-JSON checks:
-
-- input is not blank
-- valid JSON
-- top-level value is a JSON object
-
-### `ValidateStrict`
-
-Includes syntax validation. For JSON, it also requires:
-
-- every configured column is present
-- no extra keys are present
-
-For CSV, `ValidateStrict` currently behaves the same as `ValidateSyntax`.
-
-## Config
-
-### Required fields
-
-You must set:
-
-- `Columns`
-- `Mode`
-- one of:
-  - `StreamLoadURL` like `http://host:port/api/<db>/<table>/_stream_load`
-  - or `Endpoint` + `Database` + `Table`
-
-`Endpoint` is validated as a Doris FE base URL and must look like:
-
-- `http://host:port`
-- `https://host:port`
-
-It must not include a path, query string, fragment, or embedded user info.
-
-### Authentication
-
-Optional authentication fields:
-
-- `AuthenticationType`
-- `AuthenticationToken`
-
-Supported authentication types:
-
-- `AuthenticationNone`
-- `AuthenticationBasic`
-
-For basic auth:
+Every accepted send returns a `Handle`. A submitted batch has one shared handle because it concludes as one Doris load outcome.
 
 ```go
-AuthenticationType:  dorisstreamload.AuthenticationBasic,
-AuthenticationToken: "user:password",
+handle, err := client.SendBatch([]string{
+	"2026-05-01T10:00:00Z,1,login",
+	"2026-05-01T10:00:01Z,2,logout",
+})
+if err != nil {
+	return err
+}
+
+result := handle.Wait()
+if result.Err != nil {
+	return result.Err
+}
 ```
-
-### Batching and queueing
-
-`BatchBytes` and `Linger` work together like Kafka's `batch.size` and `linger.ms`: the batcher
-accumulates items until the payload reaches `BatchBytes` bytes **or** the batch has been open for
-`Linger` — whichever comes first.  Tune both together to trade latency for throughput.
-
-A submitted batch that is larger than `BatchBytes` is rejected at intake with `ErrSendTooLarge`
-rather than being sent as an oversized request.
-
-#### `BatchBytes`
-
-Maximum size (bytes) for one outbound Doris request body.  Also the admission limit per `Send`/`SendBatch` call.
-
-Default: `90 MiB`
-
-One submitted batch is never split across multiple Doris requests.
-
-#### `Linger`
-
-Maximum age of an open outbound batch before it is sealed and dispatched, even when not full.
-
-Default: `5ms`
-
-The timer starts when the first item enters the batch; new items joining before the deadline do not
-extend it.
-
-#### `MaxQueueSize`
-
-Maximum number of submitted batches held in the intake queue.
-
-Default: `100 000`
-
-Each `Send(...)` or `SendBatch(...)` occupies one slot regardless of how many records it contains.
-
-#### `MaxQueueWaitTime`
-
-How long `Send(...)` and `SendBatch(...)` will block waiting for a free queue slot.
-
-Default: `0` (wait indefinitely)
-
-When the deadline expires the call returns `ErrQueueFull`.
-
-#### `MaxUploadQueueSize`
-
-Depth of the internal channel between the batcher and the upload workers.
-
-Default: `1`
-
-### Upload workers
-
-#### `DorisUploadWorkers`
-
-Number of concurrent goroutines sending batches to Doris.
-
-Default: `1`
-
-### Retry and upload timing
-
-#### `DorisUploadRequestTimeout`
-
-HTTP deadline for a single upload attempt or a single label-poll request.
-
-Default: `300s`
-
-Values shorter than `10s` are rejected during `NewClient(...)` to prevent pairing large uploads with
-an unrealistically short timeout.
-
-#### `DorisUploadTimeout`
-
-Total time budget for deciding whether to attempt another upload after a retriable failure.
-
-Default: `300s`
-
-This does not interrupt an upload already in progress; it only governs whether a new attempt is started.
-
-Internal upload retry backoff is fixed by the library:
-
-- `1s`
-- `2s`
-- `4s`
-- `4s` thereafter
-
-#### `StatusPollTimeout`
-
-Maximum time to spend in one label-polling phase after an ambiguous outcome.
-
-Default:
-
-- `300s`
-
-Internal poll backoff is fixed by the library:
-
-- `500ms`
-- exponential growth
-- capped at `4s`
-
-### Fake sender
-
-#### `FakeSend`
-
-If `true`, bypasses real HTTP upload and returns success from the fake sender.
-
-Default:
-
-- `false`
-
-#### `FakeSendDelay`
-
-Artificial delay before fake success.
-
-Default:
-
-- `500ms`
-
-### Logging
-
-Optional logging fields:
-
-- `Logger`
-- `LogLevel`
-
-Log levels:
-
-- `LogLevelError`
-- `LogLevelInfo`
-- `LogLevelDebug`
-
-### CSV formatting
-
-Optional CSV fields:
-
-- `CSVSeparator`
-- `CSVQuote`
-
-Defaults:
-
-- separator: `,`
-- quote: `"`
-
-## Handles and Results
-
-Every accepted logical item gets one `Handle`.
 
 Supported handle methods:
 
@@ -401,232 +233,136 @@ Supported handle methods:
 - `IsDone() bool`
 - `Result() (DeliveryResult, bool)`
 
-`DeliveryResult` contains:
+Callbacks run once per submitted batch, not once per row:
 
-| Field | Meaning |
-|---|---|
-| `Err` | `nil` on success |
-| `Attempts` | Number of upload attempts used |
-| `StatusCode` | Final HTTP status, or `0` on transport error |
-| `Response` | Parsed Doris stream-load response when available |
-| `StartedAt` | Time first attempt began |
-| `FinishedAt` | Time final conclusion was reached |
+```go
+handle, err := client.SendBatchWithCallback(func(result dorisstreamload.DeliveryResult) {
+	if result.Err != nil {
+		fmt.Printf("delivery failed attempts=%d err=%v\n", result.Attempts, result.Err)
+		return
+	}
+	fmt.Printf("delivered label=%s\n", result.Response.Label)
+}, []string{
+	"2026-05-01T10:00:00Z,1,login",
+	"2026-05-01T10:00:01Z,2,logout",
+})
+```
 
-## Client Stats
+`DeliveryResult` includes `Err`, `Attempts`, `StatusCode`, `Response`, `StartedAt`, and `FinishedAt`.
 
-Call:
+Use `client.Stats()` for a lifetime snapshot:
 
 ```go
 stats := client.Stats()
+fmt.Printf("jobs=%d errors=%d records=%d bytes=%d p99=%s\n",
+	stats.TotalLoadJobs,
+	stats.ErrorJobs,
+	stats.RecordsSent,
+	stats.TotalBytesSent,
+	stats.P99LoadTime,
+)
 ```
 
-The snapshot includes:
+Stats include worker counts, job counts, error rate, retry average, total upload attempts, bytes/records sent, average rates, and p50/p90/p99/p999 load time.
 
-- worker state:
-  - `TotalWorkers`
-  - `IdleWorkers`
-  - `BusyWorkers`
-- job outcomes:
-  - `TotalLoadJobs`
-  - `ErrorJobs`
-  - `ErrorRate`
-- load time summary:
-  - `AverageLoadTime`
-  - `P50LoadTime`
-  - `P90LoadTime`
-  - `P99LoadTime`
-  - `P999LoadTime`
-- retry summary:
-  - `AverageRetries`
-- throughput summary:
-  - `TotalBytesSent`
-  - `AverageLoadSize`
-  - `AverageBytesRate`
-  - `RecordsSent`
-  - `AverageRecordsRate`
-  - `TotalUploadAttempts`
+## Parameters
 
-Rates are lifetime averages since client creation.
+Required:
 
-## Callbacks
+| Field | Description |
+|---|---|
+| `Columns` | Doris target columns in record order |
+| `Mode` | `ModeCSV` or `ModeJSON`; defaults to `ModeCSV` when unset |
+| `StreamLoadURL` | Full URL like `http://host:8030/api/db/table/_stream_load` |
+| `Endpoint` + `Database` + `Table` | Alternative to `StreamLoadURL` |
 
-Callbacks run once per submitted batch, not once per logical item.
+Connection and auth:
 
-That means:
+| Field | Default | Description |
+|---|---|---|
+| `AuthenticationType` | `AuthenticationNone` | Use `AuthenticationBasic` for basic auth |
+| `AuthenticationToken` | empty | For basic auth, `user:password` |
+| `Headers` | empty | Extra HTTP headers sent to Doris |
+| `TLSSkipVerify` | `false` | Skip TLS certificate verification |
+| `TLSCACertPath` | empty | Custom CA certificate path |
+| `HTTPClient` | SDK-created client | Optional custom HTTP client |
 
-- `SendWithCallback(...)` fires once
-- `SendBatchWithCallback(...)` also fires once
+Batching and queueing:
 
-The returned handle for that submitted batch and the callback both observe the same final `DeliveryResult`.
+| Field | Default | Description |
+|---|---|---|
+| `BatchBytes` | `90 MiB` | Max outbound request body size; also the per-send admission limit |
+| `Linger` | `5ms` | Max age of an open outbound batch before dispatch |
+| `MaxQueueSize` | `100000` | Max submitted batches in the intake queue |
+| `MaxQueueWaitTime` | `0` | How long `Send` waits for queue space; `0` waits indefinitely |
+| `MaxUploadQueueSize` | `1` | Channel depth between batcher and upload workers |
+| `DorisUploadWorkers` | `1` | Concurrent upload goroutines |
 
-## Errors
+Retry and timing:
 
-Sentinel errors:
+| Field | Default | Description |
+|---|---|---|
+| `DorisUploadRequestTimeout` | `300s` | HTTP deadline for one upload or label-poll request; minimum `10s` |
+| `DorisUploadTimeout` | `300s` | Total retry decision budget after retriable upload outcomes |
+| `StatusPollTimeout` | `300s` | Max time spent polling a label after an ambiguous outcome |
+| `CallbackTimeout` | `100ms` | Reserved callback timing budget in config |
+| `SlowCallbackWarn` | `10ms` | Slow callback warning threshold |
 
-- `ErrClientClosed`
-- `ErrQueueFull`
-- `ErrSendTooLarge`
+Behavior:
+
+| Field | Default | Description |
+|---|---|---|
+| `Validation` | `ValidateSyntax` | `ValidateNone`, `ValidateSyntax`, or `ValidateStrict` |
+| `LabelPrefix` | `go_stream_load` | Prefix for generated Doris labels |
+| `FakeSend` | `false` | Bypass real HTTP upload and return fake success |
+| `FakeSendDelay` | `500ms` | Artificial fake-send delay |
+| `FakeSendDelaySet` | `false` | Set true to make explicit `0` fake-send delay distinct from unset |
+| `Logger` | nil | Optional logger with `Printf` |
+| `LogLevel` | `LogLevelInfo` | `LogLevelError`, `LogLevelInfo`, or `LogLevelDebug` |
+| `LogLevelSet` | `false` | Set true when explicitly configuring `LogLevelError`, because error is the zero value |
+
+`BatchBytes` and `Linger` work together like Kafka `batch.size` and `linger.ms`: the SDK dispatches when the payload reaches `BatchBytes` or the open batch reaches `Linger`, whichever happens first.
 
 ## LoaderConfig
 
-`Config` is the runtime struct used directly in Go code. `LoaderConfig` is its JSON-serializable
-counterpart — load it from a file, convert to `Config`, and pass to `NewClient`.
+`LoaderConfig` is the JSON-serializable counterpart of `Config`.
 
 ```go
 lc, err := dorisstreamload.LoadLoaderConfig("loader.json")
+if err != nil {
+	return err
+}
 cfg, err := lc.Config()
+if err != nil {
+	return err
+}
 client, err := dorisstreamload.NewClient(cfg)
 ```
 
-Helpers:
+Duration fields use Go duration strings such as `"500ms"`, `"2s"`, and `"5m"`. JSON logging also supports `log_level_set`; set it to `true` when `log_level` is `0` and you mean `LogLevelError`.
 
-- `LoadLoaderConfig(path string) (LoaderConfig, error)`
-- `SaveLoaderConfig(path string, cfg LoaderConfig) error`
-- `LoaderConfigFromConfig(Config) LoaderConfig`
-- `(LoaderConfig).Config() (Config, error)`
+## Common Errors
 
-Duration fields use Go duration strings: `"500ms"`, `"2s"`, `"5m"`.
+`Send(...)` and `SendBatch(...)` can fail before data enters the SDK queue:
 
-### Connection
-
-| JSON key | Type | Description |
+| Error | Meaning | Typical action |
 |---|---|---|
-| `stream_load_url` | string | Full stream load URL, e.g. `http://host:8030/api/db/table/_stream_load` |
-| `endpoint` | string | Doris FE base URL, e.g. `http://host:8030` (used with `database` + `table`) |
-| `database` | string | Target database (required when using `endpoint`) |
-| `table` | string | Target table (required when using `endpoint`) |
-| `columns` | []string | Column names in the order they appear in each record |
-| `mode` | string | `"csv"` or `"json"` |
-| `headers` | object | Extra HTTP headers forwarded to Doris on every request |
+| `ErrClientClosed` | The client is closed | Stop sending or create a new client |
+| `ErrQueueFull` | The intake queue stayed full longer than `MaxQueueWaitTime` | Increase workers, queue size, or timeout; reduce producer rate |
+| `ErrSendTooLarge` | One submitted item or batch is larger than `BatchBytes` | Split the caller-side batch or raise `BatchBytes` up to the 90 MiB limit |
+| validation error | CSV/JSON failed configured validation | Fix the row/object or loosen `Validation` |
 
-### Authentication
+Delivery can fail after queue admission; check `DeliveryResult.Err` from the handle or callback:
 
-| JSON key | Type | Description |
+| Failure | Meaning | Typical action |
 |---|---|---|
-| `authentication_type` | string | `""` (none) or `"basic"` |
-| `authentication_token` | string | `"user:password"` for basic auth |
-
-### Batching and queueing
-
-| JSON key | Type | Default | Description |
-|---|---|---|---|
-| `batch_bytes` | int | 94371840 (90 MiB) | Max outbound request body size; also the per-send admission limit |
-| `linger` | duration | `"5ms"` | Max age of an open batch before it is sealed |
-| `max_queue_size` | int | 100000 | Max submitted batches held in the intake queue |
-| `max_queue_wait_time` | duration | `"0"` (forever) | How long `Send` blocks waiting for a free queue slot; `0` means wait indefinitely |
-| `max_upload_queue_size` | int | 1 | Depth of the internal channel between batcher and upload workers |
-| `doris_upload_workers` | int | 1 | Number of concurrent goroutines uploading batches to Doris |
-| `validation` | string | `"syntax"` | Input validation: `"none"`, `"syntax"`, or `"strict"` |
-
-### Retry and upload timing
-
-| JSON key | Type | Default | Description |
-|---|---|---|---|
-| `doris_upload_timeout` | duration | `"300s"` | Total time budget for deciding whether additional upload attempts should happen after a retriable outcome |
-| `doris_upload_request_timeout` | duration | `"300s"` | HTTP deadline for one upload request or one label-poll request (min `"10s"`) |
-| `status_poll_timeout` | duration | `"300s"` | Max time spent polling label state after an ambiguous outcome |
-
-### Labelling and callbacks
-
-| JSON key | Type | Default | Description |
-|---|---|---|---|
-| `label_prefix` | string | `"go_stream_load"` | Prefix for generated Doris load labels |
-| `callback_timeout` | duration | `"100ms"` | Max time allowed for a delivery callback to run before a slow-callback warning is logged |
-| `slow_callback_warn` | duration | `"10ms"` | Threshold at which a slow callback warning is emitted |
-
-### CSV formatting
-
-| JSON key | Type | Default | Description |
-|---|---|---|---|
-| `csv_separator` | string | `","` | Field separator character |
-| `csv_quote` | string | `"\""` | Quote character |
-
-### Logging
-
-| JSON key | Type | Default | Description |
-|---|---|---|---|
-| `log_level` | int | `1` (Info) | `0` = Error, `1` = Info, `2` = Debug |
-
-### Testing
-
-| JSON key | Type | Default | Description |
-|---|---|---|---|
-| `fake_send` | bool | `false` | Bypass real HTTP; always returns success |
-| `fake_send_delay` | duration | `"500ms"` | Artificial delay injected by the fake sender |
-| `fake_send_delay_set` | bool | `false` | Set to `true` when `fake_send_delay` is explicitly `"0s"` to distinguish from unset |
+| HTTP 4xx from Doris | Bad URL, auth, table, schema, label, or data format | Inspect `StatusCode` and Doris response message |
+| HTTP 5xx or retriable transport error | Doris/BE/network may be unavailable | The SDK retries within `DorisUploadTimeout`; check cluster health |
+| ambiguous transport error | Request may have reached Doris but response was lost | The SDK polls the load label to decide whether it became visible |
+| label state `UNKNOWN` | Doris does not know the label | The transaction was not registered; final result is failure |
+| status poll timeout | Doris did not reach a final visible/failed state in time | Increase `StatusPollTimeout` or inspect Doris load jobs |
+| callback too slow | Callback exceeded `SlowCallbackWarn` and produced an info log | Keep callbacks small; hand work to another goroutine if needed |
 
 ## Shutdown
 
-`Close()`:
-
-- stops intake
-- drains queued work
-- waits for in-flight deliveries
-
-After `Close()`:
-
-- new sends return `ErrClientClosed`
-- already accepted handles still complete
-
-## Design Notes
-
-This section is lower priority than the usage sections above. It explains why the library looks the way it does.
-
-### Why only strings
-
-The library accepts only strings so the transport boundary stays obvious:
-
-- caller owns serialization
-- library owns queueing, batching, retry, polling, and delivery tracking
-
-### Why only two modes
-
-Only these modes exist:
-
-- `csv`
-- `json`
-
-This keeps the model small and predictable:
-
-- CSV item -> one row
-- JSON item -> one object
-
-### Why batches are preserved
-
-The intake queue stores submitted batches as units.
-
-That means:
-
-- queue admission is atomic for a submitted batch
-- one submitted batch is never split across multiple Doris requests
-- callbacks can naturally be defined per submitted batch
-
-### How coalescing works
-
-Coalescing is always enabled.
-
-- CSV items are collected as `[]string` and joined with `\n` once
-- JSON items are collected as `[]string` and wrapped into one array once
-
-The library does not repeatedly concatenate strings while building a batch.
-
-### Progress and backpressure
-
-Normal flow:
-
-1. caller submits a batch
-2. intake queue accepts it
-3. batcher accumulates outbound work
-4. worker uploads to Doris
-5. handles and callbacks are completed
-
-If progress appears stalled, the usual cause is downstream backpressure:
-
-- workers blocked in upload
-- workers blocked in retry / polling
-- dispatch channel full
-- batcher cannot hand off work
-- intake queue stops draining
-
-That is usually not a queue deadlock; it is a pipeline backpressure problem.
-``
+`Close()` stops intake, drains accepted work, and waits for in-flight deliveries. After `Close()`, new sends return `ErrClientClosed`; already accepted handles still complete.

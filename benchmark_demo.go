@@ -19,12 +19,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	dorisstreamload "doris_go_stream_load"
+	dorisstreamload "github.com/wushilin/doris_go_stream_load"
 )
 
-const defaultConfigPath = "sample_use.conf"
+const defaultConfigPath = "benchmark_demo.conf"
 
-const sampleUseConfig = `# sample_use config
+const sampleUseConfig = `# benchmark_demo config
 # Lines beginning with # are comments.
 # C-style block comments are also ignored.
 # Repeat "row =" for each CSV row you want to send.
@@ -33,15 +33,24 @@ const sampleUseConfig = `# sample_use config
 
 /*
 Example Doris table:
-CREATE TABLE example_table (
-  event_time DATETIME,
-  user_id BIGINT,
-  event_name STRING
+CREATE DATABASE IF NOT EXISTS example_db;
+
+CREATE TABLE IF NOT EXISTS example_db.example_table (
+  event_time DATETIME NOT NULL,
+  user_id BIGINT NOT NULL,
+  event_name VARCHAR(64) NOT NULL
 )
 DUPLICATE KEY(event_time, user_id)
+PARTITION BY RANGE(event_time) ()
 DISTRIBUTED BY HASH(user_id) BUCKETS 8
 PROPERTIES (
-  "replication_num" = "1"
+  "dynamic_partition.enable" = "true",
+  "dynamic_partition.time_unit" = "DAY",
+  "dynamic_partition.start" = "-30",
+  "dynamic_partition.end" = "3",
+  "dynamic_partition.prefix" = "p",
+  "replication_num" = "1",
+  "compression" = "zstd"
 );
 */
 
@@ -434,13 +443,13 @@ func parseArgs() (configPath string, printSample bool) {
 }
 
 func printHelp(w io.Writer) {
-	fmt.Fprintln(w, "sample_use shows how to stream CSV rows with the dorisstreamload library.")
+	fmt.Fprintln(w, "benchmark_demo measures dorisstreamload batching, callbacks, queueing, and stats.")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
-	fmt.Fprintln(w, "  go run sample_use.go")
-	fmt.Fprintln(w, "  go run sample_use.go --config test.conf")
-	fmt.Fprintln(w, "  go run sample_use.go --sample")
-	fmt.Fprintln(w, "  go run sample_use.go --help")
+	fmt.Fprintln(w, "  go run benchmark_demo.go")
+	fmt.Fprintln(w, "  go run benchmark_demo.go --config benchmark_demo.conf")
+	fmt.Fprintln(w, "  go run benchmark_demo.go --sample")
+	fmt.Fprintln(w, "  go run benchmark_demo.go --help")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Flags:")
 	flag.CommandLine.SetOutput(w)
@@ -689,6 +698,7 @@ func dorisConfig(cfg sampleConfig) dorisstreamload.Config {
 		FakeSendDelay:             cfg.fakeSendDelay,
 		FakeSendDelaySet:          cfg.fakeSendDelaySet,
 		LogLevel:                  logLevel,
+		LogLevelSet:               true,
 		Logger:                    log.Default(),
 		HTTPClient:                newSampleHTTPClient(cfg.dorisUploadRequestTimeout),
 	}
