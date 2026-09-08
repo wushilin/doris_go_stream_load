@@ -173,7 +173,13 @@ func TestClientStatsTracksCompletedJobsAndRetries(t *testing.T) {
 		outcomes: []fakeOutcome{
 			{outcome: sendOutcome{statusCode: 502}, err: &streamLoadError{StatusCode: 502, Message: "temporary", Retriable: true}},
 			{outcome: sendOutcome{statusCode: 200, response: &StreamLoadResponse{Status: "Success"}}},
-			{outcome: sendOutcome{statusCode: 401}, err: &streamLoadError{StatusCode: 401, Message: "no auth", Retriable: false}},
+			{outcome: sendOutcome{statusCode: 0}, err: &streamLoadError{StatusCode: 0, Message: "connection reset", Ambiguous: true}},
+		},
+		pollResponses: []fakePollResponse{
+			// first job: 502 -> label ABORTED -> retry with new label -> success
+			{state: loadStateResponse{StatusCode: 200, State: "ABORTED"}},
+			// second job: ambiguous outcome and the label cannot be checked -> failure
+			{err: &streamLoadError{StatusCode: 401, Message: "load state request failed"}},
 		},
 	}
 	client := newTestClient(t, sender, Config{
@@ -493,6 +499,103 @@ func TestBatcherDoesNotLingerForFullBatch(t *testing.T) {
 	}
 }
 
+func TestBatcherAccumulatesWhileWorkersBusy(t *testing.T) {
+	// With the single worker busy, records that arrive after the linger deadline
+	// must keep accumulating into one batch instead of being dispatched as a
+	// series of tiny uploads.
+	sender := &fakeSender{sendDelay: 150 * time.Millisecond}
+	client := newTestClient(t, sender, Config{
+		StreamLoadURL:      "http://example.invalid/api/db/table/_stream_load",
+		Columns:            []string{"c1"},
+		Mode:               ModeCSV,
+		BatchBytes:         90 * 1024 * 1024,
+		Linger:             5 * time.Millisecond,
+		DorisUploadWorkers: 1,
+		MaxUploadQueueSize: 1,
+		Logger:             log.New(io.Discard, "", 0),
+	})
+	defer client.Close()
+
+	first, err := client.Send("a")
+	if err != nil {
+		t.Fatalf("Send() first error = %v", err)
+	}
+	// Give the batcher time to hand "a" to the idle worker.
+	time.Sleep(30 * time.Millisecond)
+
+	var rest []*Handle
+	for _, record := range []string{"b", "c", "d", "e"} {
+		time.Sleep(15 * time.Millisecond)
+		handle, err := client.Send(record)
+		if err != nil {
+			t.Fatalf("Send(%q) error = %v", record, err)
+		}
+		rest = append(rest, handle)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := first.WaitContext(ctx); err != nil {
+		t.Fatalf("WaitContext() first error = %v", err)
+	}
+	for i, handle := range rest {
+		if _, err := handle.WaitContext(ctx); err != nil {
+			t.Fatalf("WaitContext() rest[%d] error = %v", i, err)
+		}
+	}
+	bodies := sender.Bodies()
+	if len(bodies) != 2 || bodies[0] != "a" || bodies[1] != "b\nc\nd\ne" {
+		t.Fatalf("bodies = %#v, want [\"a\" \"b\\nc\\nd\\ne\"]: records must accumulate while the worker is busy", bodies)
+	}
+}
+
+func TestBatcherFullBatchWaitsForBusyWorker(t *testing.T) {
+	// A full batch is always dispatched: the batcher blocks until a worker is
+	// free instead of extending the linger, and no record is lost or reordered.
+	sender := &fakeSender{sendDelay: 60 * time.Millisecond}
+	client := newTestClient(t, sender, Config{
+		StreamLoadURL:      "http://example.invalid/api/db/table/_stream_load",
+		Columns:            []string{"c1"},
+		Mode:               ModeCSV,
+		BatchBytes:         3, // "x\ny" is 3 bytes
+		Linger:             5 * time.Millisecond,
+		DorisUploadWorkers: 1,
+		MaxUploadQueueSize: 1,
+		Logger:             log.New(io.Discard, "", 0),
+	})
+	defer client.Close()
+
+	var handles []*Handle
+	for _, record := range []string{"a", "b", "c", "d", "e", "f", "g"} {
+		handle, err := client.Send(record)
+		if err != nil {
+			t.Fatalf("Send(%q) error = %v", record, err)
+		}
+		handles = append(handles, handle)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for i, handle := range handles {
+		result, err := handle.WaitContext(ctx)
+		if err != nil {
+			t.Fatalf("WaitContext() handles[%d] error = %v", i, err)
+		}
+		if result.Err != nil {
+			t.Fatalf("handles[%d] result error = %v", i, result.Err)
+		}
+	}
+	bodies := sender.Bodies()
+	if got := strings.Join(bodies, "\n"); got != "a\nb\nc\nd\ne\nf\ng" {
+		t.Fatalf("bodies = %#v, want every record delivered in order", bodies)
+	}
+	for i, body := range bodies {
+		if len(body) > 3 {
+			t.Fatalf("bodies[%d] = %q exceeds BatchBytes", i, body)
+		}
+	}
+}
+
 func TestCSVBatchSendCoalescesRows(t *testing.T) {
 	sender := &fakeSender{}
 	client := newTestClient(t, sender, Config{
@@ -724,6 +827,9 @@ func TestClientRetriesTransientFailure(t *testing.T) {
 			{outcome: sendOutcome{statusCode: 502}, err: &streamLoadError{StatusCode: 502, Message: "temporary", Retriable: true}},
 			{outcome: sendOutcome{statusCode: 200, response: &StreamLoadResponse{Status: "Success"}}},
 		},
+		pollResponses: []fakePollResponse{
+			{state: loadStateResponse{StatusCode: 200, State: "ABORTED"}},
+		},
 	}
 	client := newTestClient(t, sender, Config{
 		StreamLoadURL: "http://example.invalid/api/db/table/_stream_load",
@@ -753,10 +859,18 @@ func TestClientRetriesTransientFailure(t *testing.T) {
 	}
 }
 
-func TestClientDoesNotRetryNonRetriableFailure(t *testing.T) {
+func TestRejectedUploadRetriesWithNewLabelWhenLabelNotLoaded(t *testing.T) {
+	withTestUploadRetryBackoff(t, 5*time.Millisecond, 10*time.Millisecond)
+	// Any failed upload is followed by a label check. When Doris reports the
+	// label as not loaded (UNKNOWN here), the batch is resent under a new label
+	// even though the HTTP status itself was not classified as retriable.
 	sender := &fakeSender{
 		outcomes: []fakeOutcome{
 			{outcome: sendOutcome{statusCode: 401}, err: &streamLoadError{StatusCode: 401, Message: "no auth", Retriable: false}},
+			// second attempt returns default success
+		},
+		pollResponses: []fakePollResponse{
+			{state: loadStateResponse{StatusCode: 200, State: "UNKNOWN"}},
 		},
 	}
 	client := newTestClient(t, sender, Config{
@@ -764,6 +878,7 @@ func TestClientDoesNotRetryNonRetriableFailure(t *testing.T) {
 		Columns:       []string{"c1"},
 		Mode:          ModeJSON, Linger: 10 * time.Millisecond,
 		DorisUploadWorkers: 1,
+		DorisUploadTimeout: 100 * time.Millisecond,
 		MaxUploadQueueSize: 8,
 		Logger:             log.New(io.Discard, "", 0),
 	})
@@ -775,14 +890,197 @@ func TestClientDoesNotRetryNonRetriableFailure(t *testing.T) {
 	}
 
 	result := handle.Wait()
-	if result.Err == nil {
-		t.Fatal("Wait() error = nil, want failure")
+	if result.Err != nil {
+		t.Fatalf("Wait() error = %v, want success after retry with new label", result.Err)
 	}
-	if result.Attempts != 1 {
-		t.Fatalf("attempts = %d, want 1", result.Attempts)
+	if result.Attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", result.Attempts)
+	}
+	if got := sender.PollCalls(); got != 1 {
+		t.Fatalf("poll calls = %d, want 1", got)
+	}
+	labels := sender.Labels()
+	if len(labels) != 2 || labels[0] == labels[1] {
+		t.Fatalf("labels = %v, want two distinct labels", labels)
+	}
+}
+
+func TestDorisFailStatusRetriesWithNewLabelAfterAborted(t *testing.T) {
+	withTestUploadRetryBackoff(t, 5*time.Millisecond, 10*time.Millisecond)
+	// Doris answers HTTP 200 with Status "Fail" for load-time errors such as
+	// "too many versions" (-235). Those used to be permanent failures; now the
+	// label is checked, found ABORTED, and the batch is retried with a new label.
+	failResp := &StreamLoadResponse{Status: "Fail", Message: "[E-235] too many versions, tablet=1234"}
+	sender := &fakeSender{
+		outcomes: []fakeOutcome{
+			{outcome: sendOutcome{statusCode: 200, response: failResp}, err: &streamLoadError{StatusCode: 200, Message: failResp.Message, Response: failResp}},
+			{outcome: sendOutcome{statusCode: 200, response: failResp}, err: &streamLoadError{StatusCode: 200, Message: failResp.Message, Response: failResp}},
+			// third attempt returns default success
+		},
+		pollResponses: []fakePollResponse{
+			{state: loadStateResponse{StatusCode: 200, State: "ABORTED"}},
+			{state: loadStateResponse{StatusCode: 200, State: "ABORTED"}},
+		},
+	}
+	client := newTestClient(t, sender, Config{
+		StreamLoadURL:      "http://example.invalid/api/db/table/_stream_load",
+		Columns:            []string{"c1"},
+		Mode:               ModeCSV,
+		Linger:             10 * time.Millisecond,
+		DorisUploadWorkers: 1,
+		DorisUploadTimeout: 500 * time.Millisecond,
+		MaxUploadQueueSize: 8,
+		Logger:             log.New(io.Discard, "", 0),
+	})
+	defer client.Close()
+
+	handle, err := client.SendRecord("a")
+	if err != nil {
+		t.Fatalf("SendRecord() error = %v", err)
+	}
+	result := handle.Wait()
+	if result.Err != nil {
+		t.Fatalf("Wait() error = %v, want success after retries", result.Err)
+	}
+	if result.Attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", result.Attempts)
+	}
+	if got := sender.PollCalls(); got != 2 {
+		t.Fatalf("poll calls = %d, want 2", got)
+	}
+	labels := sender.Labels()
+	if len(labels) != 3 || labels[0] == labels[1] || labels[1] == labels[2] {
+		t.Fatalf("labels = %v, want three distinct labels", labels)
+	}
+}
+
+func TestFailedUploadIsSuccessWhenLabelVisible(t *testing.T) {
+	// A 5xx from a proxy after Doris already committed the load must not be
+	// resent: the label check finds the data VISIBLE and reports success.
+	sender := &fakeSender{
+		outcomes: []fakeOutcome{
+			{outcome: sendOutcome{statusCode: 504}, err: &streamLoadError{StatusCode: 504, Message: "gateway timeout", Retriable: true}},
+		},
+		pollResponses: []fakePollResponse{
+			{state: loadStateResponse{StatusCode: 200, State: "VISIBLE"}},
+		},
+	}
+	client := newTestClient(t, sender, Config{
+		StreamLoadURL:      "http://example.invalid/api/db/table/_stream_load",
+		Columns:            []string{"c1"},
+		Mode:               ModeCSV,
+		Linger:             10 * time.Millisecond,
+		DorisUploadWorkers: 1,
+		MaxUploadQueueSize: 8,
+		Logger:             log.New(io.Discard, "", 0),
+	})
+	defer client.Close()
+
+	handle, err := client.SendRecord("a")
+	if err != nil {
+		t.Fatalf("SendRecord() error = %v", err)
+	}
+	result := handle.Wait()
+	if result.Err != nil {
+		t.Fatalf("Wait() error = %v, want success because label is VISIBLE", result.Err)
 	}
 	if got := sender.Attempts(); got != 1 {
-		t.Fatalf("sender attempts = %d, want 1", got)
+		t.Fatalf("sender attempts = %d, want 1 (no resend of loaded data)", got)
+	}
+	if result.Response == nil || result.Response.Message != "VISIBLE" {
+		t.Fatalf("response = %+v, want label state VISIBLE", result.Response)
+	}
+}
+
+func TestRejectedUploadRetriesWhenLabelCannotBeChecked(t *testing.T) {
+	withTestUploadRetryBackoff(t, 5*time.Millisecond, 10*time.Millisecond)
+	// Doris rejected the load outright (non-ambiguous), and get_load_state is
+	// unavailable (e.g. StreamLoadURL points at a BE). Like the Flink connector,
+	// retry with a new label instead of failing permanently.
+	failResp := &StreamLoadResponse{Status: "Fail", Message: "too many versions"}
+	sender := &fakeSender{
+		outcomes: []fakeOutcome{
+			{outcome: sendOutcome{statusCode: 200, response: failResp}, err: &streamLoadError{StatusCode: 200, Message: failResp.Message, Response: failResp}},
+		},
+		pollResponses: []fakePollResponse{
+			{err: &streamLoadError{StatusCode: 404, Message: "load state request failed"}},
+		},
+	}
+	client := newTestClient(t, sender, Config{
+		StreamLoadURL:      "http://example.invalid/api/db/table/_stream_load",
+		Columns:            []string{"c1"},
+		Mode:               ModeCSV,
+		Linger:             10 * time.Millisecond,
+		DorisUploadWorkers: 1,
+		DorisUploadTimeout: 200 * time.Millisecond,
+		MaxUploadQueueSize: 8,
+		Logger:             log.New(io.Discard, "", 0),
+	})
+	defer client.Close()
+
+	handle, err := client.SendRecord("a")
+	if err != nil {
+		t.Fatalf("SendRecord() error = %v", err)
+	}
+	result := handle.Wait()
+	if result.Err != nil {
+		t.Fatalf("Wait() error = %v, want success after retry", result.Err)
+	}
+	if got := sender.Attempts(); got != 2 {
+		t.Fatalf("sender attempts = %d, want 2", got)
+	}
+	labels := sender.Labels()
+	if labels[0] == labels[1] {
+		t.Fatalf("labels = %v, want distinct labels", labels)
+	}
+}
+
+func TestAmbiguousUploadFailsFastWhenLabelCannotBeChecked(t *testing.T) {
+	withTestPollBackoff(t, 5*time.Millisecond, 10*time.Millisecond)
+	// The request may have reached Doris, but the label cannot be checked
+	// because no database is configured for get_load_state. The batch must fail
+	// immediately (no retry, no waiting for StatusPollTimeout).
+	sender := &fakeSender{
+		outcomes: []fakeOutcome{
+			{outcome: sendOutcome{statusCode: 0}, err: &streamLoadError{StatusCode: 0, Message: "connection reset", Ambiguous: true}},
+		},
+		pollResponses: []fakePollResponse{
+			{err: &streamLoadError{StatusCode: 0, Message: "database is required to poll load label state"}},
+		},
+	}
+	client := newTestClient(t, sender, Config{
+		StreamLoadURL:      "http://example.invalid/api/db/table/_stream_load",
+		Columns:            []string{"c1"},
+		Mode:               ModeCSV,
+		Linger:             10 * time.Millisecond,
+		DorisUploadWorkers: 1,
+		DorisUploadTimeout: 5 * time.Second,
+		StatusPollTimeout:  5 * time.Second,
+		MaxUploadQueueSize: 8,
+		Logger:             log.New(io.Discard, "", 0),
+	})
+	defer client.Close()
+
+	started := time.Now()
+	handle, err := client.SendRecord("a")
+	if err != nil {
+		t.Fatalf("SendRecord() error = %v", err)
+	}
+	result := handle.Wait()
+	if result.Err == nil {
+		t.Fatal("Wait() error = nil, want failure for unverifiable ambiguous outcome")
+	}
+	if !strings.Contains(result.Err.Error(), "could not be checked") {
+		t.Fatalf("error = %v, want label check failure context", result.Err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("elapsed = %s, want fast failure instead of waiting for StatusPollTimeout", elapsed)
+	}
+	if got := sender.Attempts(); got != 1 {
+		t.Fatalf("sender attempts = %d, want 1 (ambiguous outcome must not be resent)", got)
+	}
+	if got := sender.PollCalls(); got != 1 {
+		t.Fatalf("poll calls = %d, want 1", got)
 	}
 }
 
@@ -1072,6 +1370,10 @@ func TestUploadRetryBackoffGrowsExponentiallyToCap(t *testing.T) {
 			{outcome: sendOutcome{statusCode: 502}, err: &streamLoadError{StatusCode: 502, Message: "temporary", Retriable: true}},
 			{outcome: sendOutcome{statusCode: 502}, err: &streamLoadError{StatusCode: 502, Message: "temporary", Retriable: true}},
 			{outcome: sendOutcome{statusCode: 200, response: &StreamLoadResponse{Status: "Success"}}},
+		},
+		pollResponses: []fakePollResponse{
+			{state: loadStateResponse{StatusCode: 200, State: "ABORTED"}},
+			{state: loadStateResponse{StatusCode: 200, State: "ABORTED"}},
 		},
 	}
 	client := newTestClient(t, sender, Config{
@@ -1593,7 +1895,7 @@ func TestDialFailureRetriesWithoutPolling(t *testing.T) {
 	// the label was never registered. The client must retry without polling.
 	sender := &fakeSender{
 		outcomes: []fakeOutcome{
-			{outcome: sendOutcome{}, err: &streamLoadError{StatusCode: 0, Message: "connection refused", Retriable: true, Ambiguous: false}},
+			{outcome: sendOutcome{}, err: &streamLoadError{StatusCode: 0, Message: "connection refused", Retriable: true, Ambiguous: false, Unsent: true}},
 			// second attempt returns default success
 		},
 	}
@@ -2027,14 +2329,20 @@ func TestLabelAlreadyExistsRunningTriggersPolling(t *testing.T) {
 	}
 }
 
-func TestLabelAlreadyExistsUnknownExistingStatusFails(t *testing.T) {
-	// An ExistingJobStatus that is neither RUNNING nor FINISHED is a permanent failure.
+func TestLabelAlreadyExistsUnknownExistingStatusChecksLabel(t *testing.T) {
+	withTestUploadRetryBackoff(t, 5*time.Millisecond, 10*time.Millisecond)
+	// An ExistingJobStatus that is neither RUNNING nor FINISHED is resolved by
+	// checking the label: ABORTED means the data was not loaded, so the batch is
+	// resent under a fresh label.
 	sender := &fakeSender{
 		outcomes: []fakeOutcome{
 			{
 				outcome: sendOutcome{statusCode: 200, response: &StreamLoadResponse{Status: "Label Already Exists", ExistingJobStatus: ""}},
 				err:     &streamLoadError{StatusCode: 200, Message: "label already exists", Retriable: false, Ambiguous: false},
 			},
+		},
+		pollResponses: []fakePollResponse{
+			{state: loadStateResponse{StatusCode: 200, State: "ABORTED"}},
 		},
 	}
 	client := newTestClient(t, sender, Config{
@@ -2043,6 +2351,7 @@ func TestLabelAlreadyExistsUnknownExistingStatusFails(t *testing.T) {
 		Mode:               ModeCSV,
 		Linger:             10 * time.Millisecond,
 		DorisUploadWorkers: 1,
+		DorisUploadTimeout: 100 * time.Millisecond,
 		MaxUploadQueueSize: 8,
 		Logger:             log.New(io.Discard, "", 0),
 	})
@@ -2053,14 +2362,18 @@ func TestLabelAlreadyExistsUnknownExistingStatusFails(t *testing.T) {
 		t.Fatalf("SendRecord() error = %v", err)
 	}
 	result := handle.Wait()
-	if result.Err == nil {
-		t.Fatal("Wait() error = nil, want failure for Label Already Exists with unknown ExistingJobStatus")
+	if result.Err != nil {
+		t.Fatalf("Wait() error = %v, want success after label check and retry", result.Err)
 	}
-	if got := sender.PollCalls(); got != 0 {
-		t.Fatalf("poll calls = %d, want 0 (non-ambiguous, must not poll)", got)
+	if got := sender.PollCalls(); got != 1 {
+		t.Fatalf("poll calls = %d, want 1", got)
 	}
-	if got := sender.Attempts(); got != 1 {
-		t.Fatalf("sender attempts = %d, want 1 (permanent failure, must not retry)", got)
+	if got := sender.Attempts(); got != 2 {
+		t.Fatalf("sender attempts = %d, want 2", got)
+	}
+	labels := sender.Labels()
+	if labels[0] == labels[1] {
+		t.Fatalf("labels = %v, want distinct labels", labels)
 	}
 }
 
@@ -2174,7 +2487,10 @@ func TestUploadTimeoutStopsAdditionalRetriesOnTransientErrors(t *testing.T) {
 	withTestUploadRetryBackoff(t, 5*time.Millisecond, 10*time.Millisecond)
 	sender := &fakeSender{
 		outcomes: []fakeOutcome{
-			{outcome: sendOutcome{statusCode: 502}, err: &streamLoadError{StatusCode: 502, Retriable: true}},
+			{outcome: sendOutcome{statusCode: 502}, err: &streamLoadError{StatusCode: 502, Message: "bad gateway", Retriable: true}},
+		},
+		pollResponses: []fakePollResponse{
+			{state: loadStateResponse{StatusCode: 200, State: "UNKNOWN"}},
 		},
 	}
 	client := newTestClient(t, sender, Config{
@@ -2198,6 +2514,9 @@ func TestUploadTimeoutStopsAdditionalRetriesOnTransientErrors(t *testing.T) {
 	}
 	if !strings.Contains(result.Err.Error(), "upload timeout") {
 		t.Fatalf("error = %v, want upload timeout error", result.Err)
+	}
+	if !strings.Contains(result.Err.Error(), "bad gateway") {
+		t.Fatalf("error = %v, want last upload error included", result.Err)
 	}
 	if result.Attempts != 1 {
 		t.Fatalf("Attempts = %d, want 1 when timeout prevents another retry", result.Attempts)

@@ -96,11 +96,22 @@ func (s *fakeSuccessSender) PollLabel(_ context.Context, _ string) (loadStateRes
 	return loadStateResponse{StatusCode: http.StatusOK, State: "VISIBLE", Message: "fake send success"}, nil
 }
 
+// streamLoadError describes a failed stream load or label poll request.
+//
+// The client decides whether to retry a failed upload from the label state in
+// Doris (see Client.deliverBatch), not from these flags alone:
+//   - Unsent: the request never reached Doris (e.g. TCP dial failure), so no
+//     label was registered and the client may resend immediately without polling.
+//   - Ambiguous: the request may have been accepted by Doris even though no
+//     usable answer came back; the client must poll the label before deciding.
+//   - Retriable: Doris (or the transport) reported a condition that is expected
+//     to be transient. Kept for diagnostics; the label check drives the retry.
 type streamLoadError struct {
 	StatusCode int
 	Message    string
 	Retriable  bool
 	Ambiguous  bool
+	Unsent     bool
 	Response   *StreamLoadResponse
 }
 
@@ -331,7 +342,7 @@ func classifyTransportError(err error) error {
 	if errors.As(err, &opErr) && opErr.Op == "dial" {
 		// TCP connection was never established; the request never reached Doris.
 		// Safe to retry immediately — no label was registered, no polling needed.
-		return &streamLoadError{StatusCode: 0, Message: err.Error(), Retriable: true, Ambiguous: false}
+		return &streamLoadError{StatusCode: 0, Message: err.Error(), Retriable: true, Ambiguous: false, Unsent: true}
 	}
 	// All other transport failures (timeout, context cancellation, mid-transfer drop)
 	// are ambiguous: the request may have reached Doris before the error occurred.

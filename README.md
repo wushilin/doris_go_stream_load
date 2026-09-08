@@ -292,10 +292,10 @@ Batching and queueing:
 | Field | Default | Description |
 |---|---|---|
 | `BatchBytes` | `90 MiB` | Max outbound request body size; also the per-send admission limit |
-| `Linger` | `5ms` | Max age of an open outbound batch before dispatch |
+| `Linger` | `5ms` | How long an open batch waits for more records before it is offered to an idle worker |
 | `MaxQueueSize` | `100000` | Max submitted batches in the intake queue |
 | `MaxQueueWaitTime` | `0` | How long `Send` waits for queue space; `0` waits indefinitely |
-| `MaxUploadQueueSize` | `1` | Channel depth between batcher and upload workers |
+| `MaxUploadQueueSize` | `1` | How many full batches can wait for a worker before the batcher blocks |
 | `DorisUploadWorkers` | `1` | Concurrent upload goroutines |
 
 Retry and timing:
@@ -303,8 +303,8 @@ Retry and timing:
 | Field | Default | Description |
 |---|---|---|
 | `DorisUploadRequestTimeout` | `300s` | HTTP deadline for one upload or label-poll request; minimum `10s` |
-| `DorisUploadTimeout` | `300s` | Total retry decision budget after retriable upload outcomes |
-| `StatusPollTimeout` | `300s` | Max time spent polling a label after an ambiguous outcome |
+| `DorisUploadTimeout` | `300s` | Total retry budget for one batch after its first failed upload |
+| `StatusPollTimeout` | `300s` | Max time spent polling a label after a failed upload |
 | `CallbackTimeout` | `100ms` | Reserved callback timing budget in config |
 | `SlowCallbackWarn` | `10ms` | Slow callback warning threshold |
 
@@ -321,7 +321,25 @@ Behavior:
 | `LogLevel` | `LogLevelInfo` | `LogLevelError`, `LogLevelInfo`, or `LogLevelDebug` |
 | `LogLevelSet` | `false` | Set true when explicitly configuring `LogLevelError`, because error is the zero value |
 
-`BatchBytes` and `Linger` work together like Kafka `batch.size` and `linger.ms`: the SDK dispatches when the payload reaches `BatchBytes` or the open batch reaches `Linger`, whichever happens first.
+`BatchBytes` and `Linger` work together like Kafka `batch.size` and `linger.ms`, with one addition that keeps uploads large under load:
+
+- A batch that reaches `BatchBytes` is always dispatched. If every worker is busy and `MaxUploadQueueSize` full batches are already waiting, the batcher blocks until a worker takes one.
+- A batch that only reaches `Linger` is handed over immediately when a worker is idle. If all workers are busy, the batcher keeps accumulating for another `Linger` and tries again, until a worker frees up or the batch fills. Busy workers therefore receive fewer, larger uploads instead of a stream of tiny ones.
+
+## Retry Semantics
+
+Every failed upload whose request may have reached Doris is followed by a `get_load_state` check of its label, and the label state decides what happens next:
+
+| Label state | Meaning | Action |
+|---|---|---|
+| `VISIBLE` / `COMMITTED` | Data was loaded despite the error (for example a 5xx from a proxy) | Success, no resend |
+| `ABORTED` / `UNKNOWN` | Data was not loaded (for example `too many versions`, `-235`, or a rejected request) | Retry with a new label after backoff, within `DorisUploadTimeout` |
+| `PREPARE` / `PRECOMMITTED` until `StatusPollTimeout` | Load still in progress | Failure, no resend, since a resend could load the data twice |
+| poll rejected (HTTP 4xx, or no database configured) | Label cannot be checked | Failure if the upload outcome was ambiguous; otherwise retry with a new label, like the Flink connector |
+
+A request that never reached Doris (TCP dial failure) is retried directly with the same label. Retries back off from 1s to 4s. When `DorisUploadTimeout` runs out the batch fails with an error that includes the last upload error.
+
+Because retry is decided by the label state rather than the HTTP status, permanent mistakes such as a wrong password or a bad column list are retried until `DorisUploadTimeout` expires. Lower it if you want such failures surfaced faster.
 
 ## LoaderConfig
 
@@ -356,11 +374,10 @@ Delivery can fail after queue admission; check `DeliveryResult.Err` from the han
 
 | Failure | Meaning | Typical action |
 |---|---|---|
-| HTTP 4xx from Doris | Bad URL, auth, table, schema, label, or data format | Inspect `StatusCode` and Doris response message |
-| HTTP 5xx or retriable transport error | Doris/BE/network may be unavailable | The SDK retries within `DorisUploadTimeout`; check cluster health |
+| upload timeout | The label was never loaded within `DorisUploadTimeout`; the error includes the last Doris response | Inspect the Doris message (auth, table, schema, data format, `too many versions`); raise `DorisUploadTimeout` for transient cluster issues |
 | ambiguous transport error | Request may have reached Doris but response was lost | The SDK polls the load label to decide whether it became visible |
-| label state `UNKNOWN` | Doris does not know the label | The transaction was not registered; final result is failure |
 | status poll timeout | Doris did not reach a final visible/failed state in time | Increase `StatusPollTimeout` or inspect Doris load jobs |
+| label state could not be checked | `get_load_state` was rejected after an ambiguous outcome | Point `StreamLoadURL`/`Endpoint` at an FE and make sure `Database` (or the URL path) names the database |
 | callback too slow | Callback exceeded `SlowCallbackWarn` and produced an info log | Keep callbacks small; hand work to another goroutine if needed |
 
 ## Shutdown

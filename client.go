@@ -12,6 +12,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,16 +30,20 @@ type queuedSubmission struct {
 }
 
 type deliveryBatch struct {
-	label       string
-	mode        Mode
-	items       []*queueItem
-	byteSize    int
-	createdAt   time.Time
-	completion  *batchCompletion
-	hasCallback bool
-	submissions []*queuedSubmission
-	csvRows     []string
-	jsonRecords []string
+	label     string
+	mode      Mode
+	items     []*queueItem
+	byteSize  int
+	createdAt time.Time
+	// lingerDeadline is when the batcher next tries to hand this batch to a
+	// worker. It starts at createdAt+Linger and is pushed back by Linger each
+	// time no worker is idle when it expires.
+	lingerDeadline time.Time
+	completion     *batchCompletion
+	hasCallback    bool
+	submissions    []*queuedSubmission
+	csvRows        []string
+	jsonRecords    []string
 }
 
 func (b *deliveryBatch) len() int {
@@ -67,6 +72,7 @@ func (b *deliveryBatch) add(item *queueItem, cfg Config) {
 		b.label = generateLabel(cfg.LabelPrefix)
 		b.mode = cfg.Mode
 		b.createdAt = time.Now()
+		b.lingerDeadline = b.createdAt.Add(cfg.Linger)
 		b.completion = newBatchCompletion()
 	}
 	b.items = append(b.items, item)
@@ -159,6 +165,11 @@ type Client struct {
 	dispatch chan *deliveryBatch
 	sender   sender
 	stats    *clientStatsCollector
+
+	// idleWorkers counts upload workers currently blocked waiting on dispatch.
+	// The batcher only hands out a linger-expired (non-full) batch when this is
+	// positive, so busy workers receive fewer, larger uploads.
+	idleWorkers atomic.Int64
 
 	wg sync.WaitGroup
 
@@ -380,25 +391,45 @@ func (c *Client) prepareItem(record string) (*queueItem, error) {
 	return item, nil
 }
 
+// runBatcher accumulates intake submissions into outbound batches and hands
+// them to upload workers.
+//
+// A full batch (BatchBytes reached) always waits for a worker: the batcher
+// blocks on the dispatch channel until a worker accepts it. A batch that only
+// reached its linger deadline is dispatched right away if a worker is idle;
+// otherwise the batcher keeps accumulating for another Linger period and tries
+// again, until the batch fills up or a worker becomes free. This avoids sending
+// a stream of tiny uploads while every worker is busy.
 func (c *Client) runBatcher() {
 	defer c.wg.Done()
 
 	var current *deliveryBatch
 
-	flush := func() {
+	// dispatch hands current to a worker and clears it. With wait=true it blocks
+	// until the dispatch queue accepts the batch. With wait=false it only
+	// succeeds when a worker is idle and can take the batch without blocking.
+	dispatch := func(wait bool) bool {
 		if current == nil || current.len() == 0 {
-			return
+			return true
 		}
-		c.logf(LogLevelDebug, "batch sealed: label=%s items=%d bytes=%d mode=%s", current.label, current.len(), current.byteSize, c.cfg.Mode)
-		c.dispatch <- current
+		// Read everything we log before the hand-off: once a worker owns the
+		// batch it may rewrite the label for a retry.
+		label, items, bytes, age := current.label, current.len(), current.byteSize, time.Since(current.createdAt)
+		if !wait {
+			if c.idleWorkers.Load() <= 0 {
+				return false
+			}
+			select {
+			case c.dispatch <- current:
+			default:
+				return false
+			}
+		} else {
+			c.dispatch <- current
+		}
 		current = nil
-	}
-
-	addItem := func(item *queueItem) {
-		if current == nil {
-			current = &deliveryBatch{}
-		}
-		current.add(item, c.cfg)
+		c.logf(LogLevelDebug, "batch sealed: label=%s items=%d bytes=%d mode=%s age=%s", label, items, bytes, c.cfg.Mode, age)
+		return true
 	}
 
 	addSubmission := func(submission *queuedSubmission) {
@@ -406,22 +437,23 @@ func (c *Client) runBatcher() {
 			current = &deliveryBatch{}
 		}
 		if current.len() > 0 && c.cfg.BatchBytes > 0 && current.byteSize+submission.appendByteSize > c.cfg.BatchBytes {
-			flush()
+			dispatch(true)
 			current = &deliveryBatch{}
 		}
 		current.addSubmission(submission)
 		for _, item := range submission.items {
-			addItem(item)
+			current.add(item, c.cfg)
 		}
 		if c.cfg.BatchBytes > 0 && current.byteSize >= c.cfg.BatchBytes {
-			flush()
+			c.logf(LogLevelDebug, "batch full")
+			dispatch(true)
 		}
 	}
 
 	for {
 		submissions, _, ok := c.intake.DequeueBatch(c.cfg.BatchBytes)
 		if !ok {
-			flush()
+			dispatch(true)
 			close(c.dispatch)
 			return
 		}
@@ -429,43 +461,50 @@ func (c *Client) runBatcher() {
 			addSubmission(submission)
 		}
 
-	drain:
-		for {
-			if current == nil || current.len() == 0 {
-				break drain
-			}
-			lingerRemaining := c.cfg.Linger - time.Since(current.createdAt)
-			if lingerRemaining <= 0 {
-				c.logf(LogLevelDebug, "batch linger reached")
-				flush()
-				break drain
-			}
+		for current != nil && current.len() > 0 {
 			remaining := c.cfg.BatchBytes - current.byteSize
 			if c.cfg.BatchBytes > 0 && remaining <= 0 {
-				flush()
-				break drain
+				c.logf(LogLevelDebug, "batch full")
+				dispatch(true)
+				break
 			}
-			submissions, _, ok, timedOut := c.intake.DequeueBatchWait(remaining, lingerRemaining)
-			if !ok {
-				flush()
-				close(c.dispatch)
-				return
+
+			if wait := time.Until(current.lingerDeadline); wait > 0 {
+				submissions, _, ok, timedOut := c.intake.DequeueBatchWait(remaining, wait)
+				if !ok {
+					dispatch(true)
+					close(c.dispatch)
+					return
+				}
+				if !timedOut {
+					for _, submission := range submissions {
+						addSubmission(submission)
+					}
+					continue
+				}
 			}
-			if timedOut {
-				c.logf(LogLevelDebug, "batch linger reached")
-				flush()
-				break drain
+
+			// Linger deadline reached. Hand the batch over only if a worker can
+			// take it now; otherwise keep accumulating for another linger period.
+			c.logf(LogLevelDebug, "batch linger reached")
+			if dispatch(false) {
+				break
 			}
-			for _, submission := range submissions {
-				addSubmission(submission)
-			}
+			c.logf(LogLevelDebug, "no idle upload worker: label=%s items=%d bytes=%d keeps accumulating for another %s", current.label, current.len(), current.byteSize, c.cfg.Linger)
+			current.lingerDeadline = time.Now().Add(c.cfg.Linger)
 		}
 	}
 }
 
 func (c *Client) runWorker(id int) {
 	defer c.wg.Done()
-	for batch := range c.dispatch {
+	for {
+		c.idleWorkers.Add(1)
+		batch, ok := <-c.dispatch
+		c.idleWorkers.Add(-1)
+		if !ok {
+			return
+		}
 		c.stats.changeBusyWorkers(1)
 		c.logf(LogLevelDebug, "worker=%d send batch label=%s items=%d bytes=%d", id, batch.label, batch.len(), batch.byteSize)
 		c.deliverBatch(batch)
@@ -473,99 +512,94 @@ func (c *Client) runWorker(id int) {
 	}
 }
 
+// deliverBatch uploads a batch, retrying until it is loaded or the retry budget
+// (DorisUploadTimeout) runs out.
+//
+// After any failed upload that may have reached Doris, the label is checked
+// with get_load_state before deciding what to do:
+//   - VISIBLE/COMMITTED: the data was loaded despite the error; success.
+//   - ABORTED/UNKNOWN: the data was definitely not loaded; retry with a fresh
+//     label. This covers Doris-side failures such as "too many versions"
+//     (-235) that used to be surfaced as permanent errors.
+//   - still in progress when StatusPollTimeout expires: fail without retrying,
+//     since a retry could load the data twice.
+//   - label state cannot be checked at all (poll rejected or not configured):
+//     fail if the upload outcome was ambiguous; otherwise Doris already said
+//     the load failed, so retry with a fresh label like the Flink connector.
+//
+// A request that never reached Doris (dial failure) is retried directly with
+// the same label, since no label was registered.
 func (c *Client) deliverBatch(batch *deliveryBatch) {
-	var (
-		outcome sendOutcome
-		err     error
-	)
-
 	started := time.Now()
 	attempts := 0
 	var retryDeadline time.Time
 
-	for {
-		if attempts > 0 && !retryDeadline.IsZero() && time.Now().After(retryDeadline) {
-			result := DeliveryResult{
-				Err:        &streamLoadError{StatusCode: outcome.statusCode, Message: fmt.Sprintf("upload did not conclude within doris upload timeout %s", c.cfg.DorisUploadTimeout)},
-				Attempts:   attempts,
-				StatusCode: outcome.statusCode,
-				Response:   outcome.response,
-				StartedAt:  started,
-				FinishedAt: time.Now(),
-			}
-			c.completeBatch(batch, result)
-			return
-		}
+	fail := func(err error, outcome sendOutcome) {
+		c.completeBatch(batch, DeliveryResult{
+			Err:        err,
+			Attempts:   attempts,
+			StatusCode: outcome.statusCode,
+			Response:   outcome.response,
+			StartedAt:  started,
+			FinishedAt: time.Now(),
+		})
+	}
 
+	for {
 		attempts++
 		c.stats.recordUploadAttempt(batch.byteSize, batch.len())
 		ctx, cancel := context.WithTimeout(context.Background(), c.cfg.DorisUploadRequestTimeout)
-		outcome, err = c.sender.Send(ctx, batch)
+		outcome, err := c.sender.Send(ctx, batch)
 		cancel()
 
 		if err == nil {
-			result := DeliveryResult{
+			c.completeBatch(batch, DeliveryResult{
 				Attempts:   attempts,
 				StatusCode: outcome.statusCode,
 				Response:   outcome.response,
 				StartedAt:  started,
 				FinishedAt: time.Now(),
-			}
-			c.completeBatch(batch, result)
+			})
 			return
 		}
+		c.logf(LogLevelDebug, "send error: label=%s attempts=%d err=%v", batch.label, attempts, err)
 
-		retriable := isRetriable(err)
-		ambiguous := isAmbiguous(err)
-		c.logf(LogLevelDebug, "send error: attempts=%d retriable=%t err=%v", attempts, retriable, err)
-		if ambiguous {
-			pollResult, pollErr := c.pollLabelUntilConclusion(batch.label, started, attempts)
-			if pollErr == nil {
-				c.completeBatch(batch, pollResult)
+		if !isUnsent(err) {
+			verdict := c.checkLabel(batch.label, started, attempts)
+			switch verdict.kind {
+			case labelLoaded:
+				c.logf(LogLevelInfo, "upload reported an error but label %s is %s; treating as success: %v", batch.label, verdict.result.Response.Message, err)
+				c.completeBatch(batch, verdict.result)
 				return
+			case labelNotLoaded:
+				c.logf(LogLevelDebug, "label %s not loaded: %v", batch.label, verdict.err)
+			case labelPending:
+				fail(verdict.err, outcome)
+				return
+			case labelUncheckable:
+				if isAmbiguous(err) {
+					fail(fmt.Errorf("%w (label %s state could not be checked: %v)", err, batch.label, verdict.err), outcome)
+					return
+				}
+				c.logf(LogLevelInfo, "label %s state could not be checked (%v); upload was rejected by Doris, retrying with a new label", batch.label, verdict.err)
 			}
-			err = pollErr
-			retriable = isRetriable(pollErr)
-			if retriable {
-				// Generate a fresh label: the old one is now registered in Doris
-				// (as ABORTED) and cannot be reused.
-				batch.label = generateLabel(c.cfg.LabelPrefix)
-			}
-		}
-		if !retriable {
-			result := DeliveryResult{
-				Err:        err,
-				Attempts:   attempts,
-				StatusCode: outcome.statusCode,
-				Response:   outcome.response,
-				StartedAt:  started,
-				FinishedAt: time.Now(),
-			}
-			c.completeBatch(batch, result)
-			return
+			// The old label is registered (or unusable) in Doris; never reuse it.
+			batch.label = generateLabel(c.cfg.LabelPrefix)
 		}
 
 		if retryDeadline.IsZero() {
 			retryDeadline = time.Now().Add(c.cfg.DorisUploadTimeout)
 		}
-		if time.Now().After(retryDeadline) {
-			result := DeliveryResult{
-				Err:        &streamLoadError{StatusCode: outcome.statusCode, Message: fmt.Sprintf("upload did not conclude within doris upload timeout %s", c.cfg.DorisUploadTimeout)},
-				Attempts:   attempts,
-				StatusCode: outcome.statusCode,
-				Response:   outcome.response,
-				StartedAt:  started,
-				FinishedAt: time.Now(),
-			}
-			c.completeBatch(batch, result)
-			return
-		}
-
 		backoff := c.retryBackoffDelay(attempts)
 		if remaining := time.Until(retryDeadline); backoff > remaining {
-			backoff = remaining
+			fail(&streamLoadError{
+				StatusCode: outcome.statusCode,
+				Message:    fmt.Sprintf("upload did not conclude within doris upload timeout %s after %d attempts; last error: %v", c.cfg.DorisUploadTimeout, attempts, err),
+				Response:   outcome.response,
+			}, outcome)
+			return
 		}
-		c.logf(LogLevelDebug, "retry scheduled: attempts=%d backoff=%s", attempts, backoff)
+		c.logf(LogLevelInfo, "upload failed, retrying: attempts=%d backoff=%s next_label=%s err=%v", attempts, backoff, batch.label, err)
 		time.Sleep(backoff)
 	}
 }
@@ -619,10 +653,10 @@ func (c *Client) warnf(format string, args ...any) {
 	log.Printf(format, args...)
 }
 
-func isRetriable(err error) bool {
+func isUnsent(err error) bool {
 	var loadErr *streamLoadError
 	if errors.As(err, &loadErr) {
-		return loadErr.Retriable
+		return loadErr.Unsent
 	}
 	return false
 }
@@ -787,7 +821,31 @@ func (v *jsonRecordValidator) validate(record string) error {
 	return nil
 }
 
-func (c *Client) pollLabelUntilConclusion(label string, started time.Time, attempts int) (DeliveryResult, error) {
+type labelVerdictKind int
+
+const (
+	// labelLoaded: the label is VISIBLE or COMMITTED; the data is in Doris.
+	labelLoaded labelVerdictKind = iota
+	// labelNotLoaded: the label is ABORTED or UNKNOWN; the data is not in Doris
+	// and the batch can be safely resent under a new label.
+	labelNotLoaded
+	// labelPending: the label had not reached a terminal state (or Doris could
+	// not be reached) before StatusPollTimeout; the outcome is still unknown.
+	labelPending
+	// labelUncheckable: the load state request was rejected outright (missing
+	// database, HTTP 4xx), so the label cannot be checked.
+	labelUncheckable
+)
+
+type labelVerdict struct {
+	kind   labelVerdictKind
+	result DeliveryResult
+	err    error
+}
+
+// checkLabel polls get_load_state for label until it reaches a terminal state,
+// StatusPollTimeout expires, or the poll itself is rejected.
+func (c *Client) checkLabel(label string, started time.Time, attempts int) labelVerdict {
 	deadline := time.Now().Add(c.cfg.StatusPollTimeout)
 	backoff := statusPollInitialBackoff
 	for {
@@ -797,7 +855,7 @@ func (c *Client) pollLabelUntilConclusion(label string, started time.Time, attem
 		if err == nil {
 			switch strings.ToUpper(state.State) {
 			case "VISIBLE", "COMMITTED":
-				return DeliveryResult{
+				return labelVerdict{kind: labelLoaded, result: DeliveryResult{
 					Attempts:   attempts,
 					StatusCode: state.StatusCode,
 					Response: &StreamLoadResponse{
@@ -807,47 +865,64 @@ func (c *Client) pollLabelUntilConclusion(label string, started time.Time, attem
 					},
 					StartedAt:  started,
 					FinishedAt: time.Now(),
-				}, nil
+				}}
 			case "ABORTED":
-				// Doris aborted the transaction (e.g. connection was cut before the
-				// request completed). The data was not loaded, so it is safe to retry
-				// with a fresh label.
-				return DeliveryResult{}, &streamLoadError{
+				// Doris aborted the transaction (load rejected, connection cut, ...).
+				// The data was not loaded, so it is safe to retry with a fresh label.
+				return labelVerdict{kind: labelNotLoaded, err: &streamLoadError{
 					StatusCode: state.StatusCode,
 					Message:    fmt.Sprintf("load label %s concluded as ABORTED", label),
 					Retriable:  true,
-					Ambiguous:  false,
-				}
-			case "PREPARE", "PRECOMMITTED":
+				}}
 			case "UNKNOWN":
 				// Label not found in Doris — the transaction was never registered.
 				// Data was not loaded; retry with a new label rather than polling
 				// indefinitely for a state that will never change.
-				return DeliveryResult{}, &streamLoadError{
+				return labelVerdict{kind: labelNotLoaded, err: &streamLoadError{
 					StatusCode: state.StatusCode,
 					Message:    fmt.Sprintf("load label %s not found in Doris (state=UNKNOWN)", label),
 					Retriable:  true,
-					Ambiguous:  false,
-				}
+				}}
 			default:
+				// PREPARE, PRECOMMITTED, or an unrecognised state: keep polling.
 			}
+		} else if isPollRejected(err) {
+			return labelVerdict{kind: labelUncheckable, err: err}
 		}
 
 		if time.Now().After(deadline) {
 			if err != nil {
-				return DeliveryResult{}, err
+				return labelVerdict{kind: labelPending, err: &streamLoadError{
+					StatusCode: state.StatusCode,
+					Message:    fmt.Sprintf("load label %s state could not be determined before poll timeout; last poll error: %v", label, err),
+					Ambiguous:  true,
+				}}
 			}
-			return DeliveryResult{}, &streamLoadError{
+			return labelVerdict{kind: labelPending, err: &streamLoadError{
 				StatusCode: state.StatusCode,
 				Message:    fmt.Sprintf("load label %s did not reach a terminal state before poll timeout; last state=%s", label, state.State),
-				Retriable:  false,
 				Ambiguous:  true,
-			}
+			}}
 		}
 
 		time.Sleep(backoff)
 		backoff = nextBackoff(backoff, statusPollMaxBackoff)
 	}
+}
+
+// isPollRejected reports whether a get_load_state error is definitive: the
+// request could not be built (no database configured) or Doris answered with a
+// client error (HTTP 4xx). Transport failures and server errors are transient
+// and keep polling until StatusPollTimeout.
+func isPollRejected(err error) bool {
+	var loadErr *streamLoadError
+	if !errors.As(err, &loadErr) {
+		return false
+	}
+	if loadErr.Ambiguous || loadErr.Unsent {
+		return false
+	}
+	return loadErr.StatusCode == 0 || (loadErr.StatusCode >= 400 && loadErr.StatusCode < 500)
 }
 
 func nextBackoff(current, max time.Duration) time.Duration {
