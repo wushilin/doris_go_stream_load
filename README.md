@@ -286,7 +286,7 @@ Connection and auth:
 | `TLSSkipVerify` | `false` | Skip TLS certificate verification |
 | `TLSCACertPath` | empty | Custom CA certificate path |
 | `HTTPClient` | SDK-created client | Optional custom HTTP client |
-| `CompressionType` | `none` | Compress CSV request bodies with `gz`, `lzo`, `bz2`, `lz4`, `lzop`, or `deflate`; Doris decompresses them during Stream Load. Compression is CSV-only. |
+| `CompressionType` | `none` | Compress CSV or JSON request bodies with `gz`, `lzo`, `bz2`, `lz4`, `lzop`, or `deflate`. Doris decompresses the body during Stream Load. |
 
 For example, enable gzip compression in the client configuration:
 
@@ -303,7 +303,7 @@ if err != nil {
 defer client.Close()
 ```
 
-The equivalent `LoaderConfig` JSON field is `"compression_type": "gz"`. Leave `CompressionType` unset (or use `CompressionNone`) to send uncompressed CSV.
+The equivalent `LoaderConfig` JSON field is `"compression_type": "gz"`. The same codecs are accepted with `ModeJSON`. Leave `CompressionType` unset (or use `CompressionNone`) to send an uncompressed request body.
 
 Batching and queueing:
 
@@ -313,7 +313,7 @@ Batching and queueing:
 | `Linger` | `5ms` | How long an open batch waits for more records before it is offered to an idle worker |
 | `MaxQueueSize` | `100000` | Max submitted batches in the intake queue |
 | `MaxQueueWaitTime` | `0` | How long `Send` waits for queue space; `0` waits indefinitely |
-| `MaxUploadQueueSize` | `1` | How many full batches can wait for a worker before the batcher blocks |
+| `MaxUploadQueueSize` | `max(1, DorisUploadWorkers)` | How many full batches can wait for a worker before the batcher blocks |
 | `DorisUploadWorkers` | `1` | Concurrent upload goroutines |
 
 Retry and timing:
@@ -339,7 +339,7 @@ Behavior:
 | `LogLevel` | `LogLevelInfo` | `LogLevelError`, `LogLevelInfo`, or `LogLevelDebug` |
 | `LogLevelSet` | `false` | Set true when explicitly configuring `LogLevelError`, because error is the zero value |
 
-CSV compression is off by default. Set `CompressionType` to a Doris codec, for example `CompressionType: dorisstreamload.CompressionGzip`. `LoaderConfig` accepts the equivalent JSON setting `"compression_type": "gz"`. Doris Stream Load compression is supported for CSV mode.
+Compression is off by default. CSV and JSON support the configured codecs. We verified all six non-none codecs with JSON Stream Load requests against the configured Doris server; this behavior is broader than the current Stream Load docs, which describe `compress_type` as CSV-only. The equivalent `LoaderConfig` field is `"compression_type": "gz"`.
 
 `BatchBytes` and `Linger` work together like Kafka `batch.size` and `linger.ms`, with one addition that keeps uploads large under load:
 

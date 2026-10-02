@@ -18,7 +18,6 @@ import (
 const (
 	maxBatchBytes                    = 90 * 1024 * 1024
 	defaultMaxQueueSize              = 100_000
-	defaultMaxUploadQueueSize        = 1
 	defaultBatchBytes                = maxBatchBytes
 	defaultDorisUploadWorkers        = 1
 	defaultLinger                    = 5 * time.Millisecond
@@ -133,14 +132,17 @@ func (c Config) withDefaults() Config {
 	if c.MaxQueueSize <= 0 {
 		c.MaxQueueSize = defaultMaxQueueSize
 	}
+	if c.DorisUploadWorkers <= 0 {
+		c.DorisUploadWorkers = defaultDorisUploadWorkers
+	}
 	if c.MaxUploadQueueSize <= 0 {
-		c.MaxUploadQueueSize = defaultMaxUploadQueueSize
+		c.MaxUploadQueueSize = c.DorisUploadWorkers
+		if c.MaxUploadQueueSize < 1 {
+			c.MaxUploadQueueSize = 1
+		}
 	}
 	if c.BatchBytes == 0 {
 		c.BatchBytes = defaultBatchBytes
-	}
-	if c.DorisUploadWorkers <= 0 {
-		c.DorisUploadWorkers = defaultDorisUploadWorkers
 	}
 	if c.Linger <= 0 {
 		c.Linger = defaultLinger
@@ -203,9 +205,6 @@ func (c Config) validate() error {
 	case CompressionNone, CompressionGzip, CompressionLZO, CompressionBZip2, CompressionLZ4, CompressionLZOP, CompressionDeflate:
 	default:
 		return fmt.Errorf("invalid compression type %q", c.CompressionType)
-	}
-	if c.CompressionType != CompressionNone && c.Mode != ModeCSV {
-		return errors.New("Doris Stream Load compression is supported only for CSV mode")
 	}
 	switch c.Validation {
 	case ValidateNone, ValidateSyntax, ValidateStrict:
