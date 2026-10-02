@@ -136,6 +136,10 @@ func (s *httpSender) Send(ctx context.Context, batch *deliveryBatch) (sendOutcom
 	if err != nil {
 		return sendOutcome{}, &streamLoadError{StatusCode: 0, Message: err.Error(), Retriable: false}
 	}
+	body, err = compressUploadBody(body, s.cfg.CompressionType)
+	if err != nil {
+		return sendOutcome{}, &streamLoadError{StatusCode: 0, Message: err.Error(), Retriable: false}
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.streamLoadURL(), bytes.NewReader(body))
 	if err != nil {
@@ -154,13 +158,18 @@ func (s *httpSender) Send(ctx context.Context, batch *deliveryBatch) (sendOutcom
 		req.Header.Set("column_separator", s.cfg.CSVSeparator)
 		req.Header.Set("enclose", s.cfg.CSVQuote)
 	}
-	req.Header.Set("Content-Length", strconv.Itoa(len(body)))
-
 	for key, values := range s.cfg.Headers {
 		for _, value := range values {
 			req.Header.Add(key, value)
 		}
 	}
+	if s.cfg.CompressionType == CompressionNone {
+		req.Header.Del("compress_type")
+	} else {
+		req.Header.Set("compress_type", string(s.cfg.CompressionType))
+	}
+	req.ContentLength = int64(len(body))
+	req.Header.Set("Content-Length", strconv.Itoa(len(body)))
 
 	if s.cfg.AuthenticationType == AuthenticationBasic {
 		username, password, _ := strings.Cut(s.cfg.AuthenticationToken, ":")

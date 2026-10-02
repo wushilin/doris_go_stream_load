@@ -12,6 +12,7 @@ func TestLoaderConfigConvertsToRuntimeConfig(t *testing.T) {
 		StreamLoadURL:             "http://example.invalid/api/db/t/_stream_load",
 		Columns:                   []string{"c1", "c2"},
 		Mode:                      ModeCSV,
+		CompressionType:           CompressionGzip,
 		AuthenticationType:        AuthenticationBasic,
 		AuthenticationToken:       "user:pass",
 		Linger:                    "250ms",
@@ -51,6 +52,9 @@ func TestLoaderConfigConvertsToRuntimeConfig(t *testing.T) {
 	}
 	if cfg.Validation != ValidateSyntax {
 		t.Fatalf("Validation = %q, want %q", cfg.Validation, ValidateSyntax)
+	}
+	if cfg.CompressionType != CompressionGzip {
+		t.Fatalf("CompressionType = %q, want %q", cfg.CompressionType, CompressionGzip)
 	}
 	if !cfg.TLSSkipVerify {
 		t.Fatal("TLSSkipVerify = false, want true")

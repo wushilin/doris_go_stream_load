@@ -12,12 +12,12 @@ It keeps the public model small:
 
 ## Requirements
 
-Go `1.20` or newer.
+Go `1.26.4` or newer.
 
 ## Install
 
 ```sh
-go get github.com/wushilin/doris_go_stream_load@v1.0.0
+go get github.com/wushilin/doris_go_stream_load@v1.1.0
 ```
 
 Import path:
@@ -36,7 +36,7 @@ This example is local runnable. It does not require a Doris cluster because `Fak
 mkdir dorisstreamload-quickstart
 cd dorisstreamload-quickstart
 go mod init quickstart
-go get github.com/wushilin/doris_go_stream_load@v1.0.0
+go get github.com/wushilin/doris_go_stream_load@v1.1.0
 ```
 
 Create `main.go`:
@@ -275,6 +275,7 @@ Required:
 | `Mode` | `ModeCSV` or `ModeJSON`; defaults to `ModeCSV` when unset |
 | `StreamLoadURL` | Full URL like `http://host:8030/api/db/table/_stream_load` |
 | `Endpoint` + `Database` + `Table` | Alternative to `StreamLoadURL` |
+| `CompressionType` | `none` | Compress CSV request bodies with `gz`, `lzo`, `bz2`, `lz4`, `lzop`, or `deflate`; Doris decompresses them during Stream Load. Compression is CSV-only. |
 
 Connection and auth:
 
@@ -320,6 +321,8 @@ Behavior:
 | `Logger` | nil | Optional logger with `Printf` |
 | `LogLevel` | `LogLevelInfo` | `LogLevelError`, `LogLevelInfo`, or `LogLevelDebug` |
 | `LogLevelSet` | `false` | Set true when explicitly configuring `LogLevelError`, because error is the zero value |
+
+CSV compression is off by default. Set `CompressionType` to a Doris codec, for example `CompressionType: dorisstreamload.CompressionGzip`. `LoaderConfig` accepts the equivalent JSON setting `"compression_type": "gz"`. Doris Stream Load compression is supported for CSV mode.
 
 `BatchBytes` and `Linger` work together like Kafka `batch.size` and `linger.ms`, with one addition that keeps uploads large under load:
 

@@ -43,12 +43,21 @@ var (
 )
 
 type Mode string
+type CompressionType string
 type ValidationMode string
 type AuthenticationType string
 
 const (
 	ModeCSV  Mode = "csv"
 	ModeJSON Mode = "json"
+
+	CompressionNone    CompressionType = "none"
+	CompressionGzip    CompressionType = "gz"
+	CompressionLZO     CompressionType = "lzo"
+	CompressionBZip2   CompressionType = "bz2"
+	CompressionLZ4     CompressionType = "lz4"
+	CompressionLZOP    CompressionType = "lzop"
+	CompressionDeflate CompressionType = "deflate"
 
 	ValidateNone   ValidationMode = "none"
 	ValidateSyntax ValidationMode = "syntax"
@@ -76,9 +85,10 @@ type Config struct {
 	Table         string
 	StreamLoadURL string
 
-	Columns []string
-	Headers http.Header
-	Mode    Mode
+	Columns         []string
+	Headers         http.Header
+	Mode            Mode
+	CompressionType CompressionType
 
 	AuthenticationType  AuthenticationType
 	AuthenticationToken string
@@ -117,6 +127,9 @@ type Config struct {
 }
 
 func (c Config) withDefaults() Config {
+	if c.CompressionType == "" {
+		c.CompressionType = CompressionNone
+	}
 	if c.MaxQueueSize <= 0 {
 		c.MaxQueueSize = defaultMaxQueueSize
 	}
@@ -185,6 +198,14 @@ func (c Config) validate() error {
 	case ModeCSV, ModeJSON:
 	default:
 		return errors.New("invalid mode")
+	}
+	switch c.CompressionType {
+	case CompressionNone, CompressionGzip, CompressionLZO, CompressionBZip2, CompressionLZ4, CompressionLZOP, CompressionDeflate:
+	default:
+		return fmt.Errorf("invalid compression type %q", c.CompressionType)
+	}
+	if c.CompressionType != CompressionNone && c.Mode != ModeCSV {
+		return errors.New("Doris Stream Load compression is supported only for CSV mode")
 	}
 	switch c.Validation {
 	case ValidateNone, ValidateSyntax, ValidateStrict:

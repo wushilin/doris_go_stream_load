@@ -9,13 +9,14 @@ import (
 )
 
 type LoaderConfig struct {
-	Endpoint      string      `json:"endpoint,omitempty"`
-	Database      string      `json:"database,omitempty"`
-	Table         string      `json:"table,omitempty"`
-	StreamLoadURL string      `json:"stream_load_url,omitempty"`
-	Columns       []string    `json:"columns,omitempty"`
-	Headers       http.Header `json:"headers,omitempty"`
-	Mode          Mode        `json:"mode,omitempty"`
+	Endpoint        string          `json:"endpoint,omitempty"`
+	Database        string          `json:"database,omitempty"`
+	Table           string          `json:"table,omitempty"`
+	StreamLoadURL   string          `json:"stream_load_url,omitempty"`
+	Columns         []string        `json:"columns,omitempty"`
+	Headers         http.Header     `json:"headers,omitempty"`
+	Mode            Mode            `json:"mode,omitempty"`
+	CompressionType CompressionType `json:"compression_type,omitempty"`
 
 	AuthenticationType  AuthenticationType `json:"authentication_type,omitempty"`
 	AuthenticationToken string             `json:"authentication_token,omitempty"`
@@ -78,6 +79,7 @@ func LoaderConfigFromConfig(cfg Config) LoaderConfig {
 		Columns:                   append([]string(nil), cfg.Columns...),
 		Headers:                   cfg.Headers.Clone(),
 		Mode:                      cfg.Mode,
+		CompressionType:           cfg.CompressionType,
 		AuthenticationType:        cfg.AuthenticationType,
 		AuthenticationToken:       cfg.AuthenticationToken,
 		MaxQueueSize:              cfg.MaxQueueSize,
@@ -114,6 +116,7 @@ func (lc LoaderConfig) Config() (Config, error) {
 		Columns:             append([]string(nil), lc.Columns...),
 		Headers:             lc.Headers.Clone(),
 		Mode:                lc.Mode,
+		CompressionType:     lc.CompressionType,
 		AuthenticationType:  lc.AuthenticationType,
 		AuthenticationToken: lc.AuthenticationToken,
 		MaxQueueSize:        lc.MaxQueueSize,
