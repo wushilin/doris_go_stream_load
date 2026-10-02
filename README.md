@@ -275,7 +275,6 @@ Required:
 | `Mode` | `ModeCSV` or `ModeJSON`; defaults to `ModeCSV` when unset |
 | `StreamLoadURL` | Full URL like `http://host:8030/api/db/table/_stream_load` |
 | `Endpoint` + `Database` + `Table` | Alternative to `StreamLoadURL` |
-| `CompressionType` | `none` | Compress CSV request bodies with `gz`, `lzo`, `bz2`, `lz4`, `lzop`, or `deflate`; Doris decompresses them during Stream Load. Compression is CSV-only. |
 
 Connection and auth:
 
@@ -287,6 +286,24 @@ Connection and auth:
 | `TLSSkipVerify` | `false` | Skip TLS certificate verification |
 | `TLSCACertPath` | empty | Custom CA certificate path |
 | `HTTPClient` | SDK-created client | Optional custom HTTP client |
+| `CompressionType` | `none` | Compress CSV request bodies with `gz`, `lzo`, `bz2`, `lz4`, `lzop`, or `deflate`; Doris decompresses them during Stream Load. Compression is CSV-only. |
+
+For example, enable gzip compression in the client configuration:
+
+```go
+client, err := dorisstreamload.NewClient(dorisstreamload.Config{
+	StreamLoadURL:   "http://fe:8030/api/db/table/_stream_load",
+	Columns:         []string{"id", "payload"},
+	Mode:            dorisstreamload.ModeCSV,
+	CompressionType: dorisstreamload.CompressionGzip,
+})
+if err != nil {
+	return err
+}
+defer client.Close()
+```
+
+The equivalent `LoaderConfig` JSON field is `"compression_type": "gz"`. Leave `CompressionType` unset (or use `CompressionNone`) to send uncompressed CSV.
 
 Batching and queueing:
 
